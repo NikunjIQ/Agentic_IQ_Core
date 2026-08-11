@@ -1,0 +1,132 @@
+import os
+import re
+import json
+from typing import Any
+from datetime import datetime
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+from dotenv import load_dotenv
+import pandas as pd
+import numpy as np
+
+from agent.graph import COMPILED_GRAPH
+
+load_dotenv()
+
+# Disable LangSmith tracing — prevents 403 spam and reduces latency
+os.environ["LANGCHAIN_TRACING_V2"] = "false"
+os.environ["LANGCHAIN_API_KEY"] = ""
+
+app = FastAPI(title="IQCore Agent API")
+
+class ChatRequest(BaseModel):
+    question: str
+    conversation_history: list[dict] = []
+
+class ChatResponse(BaseModel):
+    final_answer: str
+    dataframes: list[Any]
+    tools_called: list[str]
+    tool_results_raw: list[dict]
+    complexity: str
+
+def safe_serialize(obj):
+    if isinstance(obj, float):
+        if np.isnan(obj) or np.isinf(obj):
+            return None
+        return obj
+    elif isinstance(obj, (pd.Timestamp, datetime)):
+        return obj.isoformat()
+    elif isinstance(obj, dict):
+        return {str(k): safe_serialize(v) for k, v in obj.items()}
+    elif isinstance(obj, (list, tuple, set)):
+        return [safe_serialize(v) for v in obj]
+    return obj
+
+def _explain_failure(error: Exception) -> str:
+    """Turn an exception into something a user can act on.
+
+    Without this every failure reaches the UI as a bare 500, which tells the
+    person nothing — a spent LLM quota and an unreachable Zabbix look identical.
+    """
+    text = str(error)
+
+    if "rate_limit_exceeded" in text or "429" in text:
+        wait = re.search(r"try again in (\S+)\.\s", text)
+        limit = "per-day" if "TPD" in text or "per day" in text else "per-minute"
+        readable = re.sub(r"\.\d+", "", wait.group(1)) if wait else None
+        return (f"The language model {limit} rate limit has been reached, so I could not "
+                f"finish answering."
+                + (f" Capacity returns in about {readable}." if readable else "")
+                + " The monitoring and ticketing systems themselves are unaffected.")
+
+    if any(word in text.lower() for word in ("connection", "timeout", "unreachable", "refused")):
+        return (f"I could not reach one of the backing systems (Zabbix or Zammad). "
+                f"Please check they are online. Details: {text[:200]}")
+
+    return f"Something went wrong while answering: {type(error).__name__}: {text[:300]}"
+
+
+@app.post("/chat")
+async def chat(request: ChatRequest):
+    initial_state = {
+        "question": request.question,
+        "conversation_history": request.conversation_history,
+        "complexity": None,
+        "simple_tool_choice": None,
+        "tool_results_raw": [],
+        "dataframes": [],
+        "tools_called": [],
+        "final_answer": None,
+    }
+    try:
+        result_state = COMPILED_GRAPH.invoke(initial_state)
+    except Exception as exc:
+        # Answer with an explanation rather than a 500 the frontend cannot interpret.
+        return JSONResponse(content={
+            "final_answer": _explain_failure(exc),
+            "dataframes": [],
+            "tools_called": [],
+            "tool_results_raw": [{"error": f"{type(exc).__name__}: {str(exc)[:500]}"}],
+            "complexity": "error",
+        })
+
+    serialized_dfs = []
+    for df in result_state.get("dataframes", []):
+        if isinstance(df, pd.DataFrame):
+            cleaned_df = df.where(pd.notnull(df), None)
+            serialized_dfs.append(cleaned_df.to_dict(orient="records"))
+        elif isinstance(df, dict):
+            serialized_dfs.append(df)
+        elif isinstance(df, list):
+            serialized_dfs.append(df)
+
+    payload = {
+        "final_answer": result_state["final_answer"] or "",
+        "dataframes": serialized_dfs,
+        "tools_called": result_state["tools_called"] or [],
+        "tool_results_raw": result_state["tool_results_raw"] or [],
+        "complexity": result_state["complexity"] or "unknown",
+    }
+
+    try:
+        clean_payload = safe_serialize(payload)
+        json_str = json.dumps(clean_payload, default=str)
+        return JSONResponse(content=json.loads(json_str))
+    except Exception as exc:
+        # The answer is already computed; never lose it to a serialisation problem
+        # in the debug payload.
+        return JSONResponse(content={
+            "final_answer": payload["final_answer"],
+            "dataframes": [],
+            "tools_called": payload["tools_called"],
+            "tool_results_raw": [{"error": f"Could not serialise debug data: {exc}"}],
+            "complexity": payload["complexity"],
+        })
+
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
+
+

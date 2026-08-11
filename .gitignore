@@ -1,0 +1,26 @@
+# Secrets — never commit these.
+# Patterns are unanchored (no leading slash) so they match at ANY depth:
+# ".streamlit/secrets.toml" would only have matched the repo root, which let
+# frontend/.streamlit/secrets.toml through.
+.env
+.env.*
+!.env.example
+**/.streamlit/secrets.toml
+secrets.toml
+*.pem
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+venv/
+.venv/
+env/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
