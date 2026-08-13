@@ -211,6 +211,60 @@ class PrometheusClient:
 
 
 # ---------------------------------------------------------------------------
+# OpenSearch (OpenStack application logs, shipped by fluentd)
+# ---------------------------------------------------------------------------
+# The same severity is written many ways: 'error' appears 1,075,935 times and
+# 'ERROR' 23,657. Counting one spelling answers "how many errors today" wrong by
+# a factor of 45, so every level is folded into a canonical bucket.
+LOG_LEVEL_ALIASES = {
+    "critical": ["CRITICAL", "critical", "EMER", "emerg", "alert", "FATAL", "fatal"],
+    "error": ["ERROR", "error", "Error", "ERR", "err"],
+    "warning": ["WARNING", "warning", "Warning", "WARN", "warn"],
+    "info": ["INFO", "info", "Info", "Note", "note", "notice", "NOTICE"],
+    "debug": ["DEBUG", "debug", "Debug", "TRACE", "trace"],
+}
+_LEVEL_OF_VARIANT = {v: canonical
+                     for canonical, variants in LOG_LEVEL_ALIASES.items()
+                     for v in variants}
+
+
+def canonical_level(raw: str) -> str:
+    return _LEVEL_OF_VARIANT.get(str(raw), str(raw).lower() or "unknown")
+
+
+class OpenSearchClient:
+    def __init__(self):
+        self.url = os.getenv("OPENSEARCH_URL", "http://192.168.1.32:9200").rstrip("/")
+        self.index = os.getenv("OPENSEARCH_INDEX", "flog-*")
+        user = os.getenv("OPENSEARCH_USER", "")
+        password = os.getenv("OPENSEARCH_PASS", "")
+        self.auth = HTTPBasicAuth(user, password) if user else None
+
+    def search(self, body: dict, path: str = "_search") -> dict:
+        res = requests.post(f"{self.url}/{self.index}/{path}", json=body,
+                            auth=self.auth, timeout=45)
+        res.raise_for_status()
+        return res.json()
+
+    def count(self, query: dict) -> int:
+        res = requests.post(f"{self.url}/{self.index}/_count", json={"query": query},
+                            auth=self.auth, timeout=45)
+        res.raise_for_status()
+        return int(res.json().get("count", 0))
+
+    def indices(self) -> list:
+        try:
+            res = requests.get(f"{self.url}/_cat/indices/{self.index}",
+                               params={"format": "json", "h": "index,docs.count",
+                                       "s": "index:desc"},
+                               auth=self.auth, timeout=30)
+            res.raise_for_status()
+            return res.json()
+        except Exception:
+            return []
+
+
+# ---------------------------------------------------------------------------
 # Zammad
 # ---------------------------------------------------------------------------
 class ZammadClient:

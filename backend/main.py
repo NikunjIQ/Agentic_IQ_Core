@@ -62,6 +62,11 @@ def _explain_failure(error: Exception) -> str:
                 + (f" Capacity returns in about {readable}." if readable else "")
                 + " The monitoring and ticketing systems themselves are unaffected.")
 
+    if "tool_use_failed" in text:
+        return ("I understood the question but could not build a valid query for it. "
+                "Please rephrase it slightly — naming the system or the time period "
+                "explicitly usually helps.")
+
     if any(word in text.lower() for word in ("connection", "timeout", "unreachable", "refused")):
         return (f"I could not reach one of the backing systems (Zabbix or Zammad). "
                 f"Please check they are online. Details: {text[:200]}")

@@ -15,7 +15,8 @@ import re
 
 import conftest  # noqa: F401
 from golden_queries import (ZABBIX_QUERIES, ZAMMAD_QUERIES, PROMETHEUS_QUERIES,
-                            ZAMMAD_SUMMARY_MUST_MENTION, HONESTY_EXPECTATIONS)
+                            OPENSEARCH_QUERIES, ZAMMAD_SUMMARY_MUST_MENTION,
+                            HONESTY_EXPECTATIONS)
 
 
 def _number_after(summary: str, label: str):
@@ -56,6 +57,61 @@ def test_prometheus_answers_every_expected_question():
         summary = str(result["summary"])
         assert "failed" not in summary[:40].lower(), f"{label}: {summary[:140]}"
         assert must_contain in summary, f"{label}: expected {must_contain!r} in {summary[:160]!r}"
+
+
+def test_opensearch_answers_every_expected_question():
+    from tools.opensearch_tool import query_opensearch
+    for label, args, must_contain in OPENSEARCH_QUERIES:
+        result = query_opensearch.invoke(dict(args))
+        summary = str(result["summary"])
+        assert "failed" not in summary[:40].lower(), f"{label}: {summary[:140]}"
+        assert must_contain in summary, f"{label}: expected {must_contain!r} in {summary[:180]!r}"
+
+
+def test_opensearch_level_counts_reconcile_with_the_total():
+    """Access logs carry no level, so the breakdown must account for the gap."""
+    from tools.opensearch_tool import query_opensearch
+    result = query_opensearch.invoke({"date_filter": "yesterday"})
+    summary = str(result["summary"])
+    total = int(re.search(r"for yesterday: ([\d,]+) entries", summary).group(1).replace(",", ""))
+    levelled = sum(result["raw"]["levels"].values())
+    if levelled < total:
+        assert "no level field" in summary, (
+            f"{total - levelled:,} entries are unaccounted for and the summary does not say so")
+
+
+def test_opensearch_normalises_log_level_case():
+    """'error' and 'ERROR' are the same severity; counting one is wrong by ~45x."""
+    from tools.opensearch_tool import query_opensearch
+    result = query_opensearch.invoke({"log_level": "error", "date_filter": "last 7 days"})
+    levels = result["raw"].get("levels", {})
+    assert all(k == k.upper() for k in levels), f"levels not folded to one case: {levels}"
+    assert not ({"error", "Error", "ERR"} & set(levels)), f"unfolded variants present: {levels}"
+
+
+def test_opensearch_redirects_device_questions_to_zabbix():
+    """Zero hits for a Cisco device must not read as 'nothing is wrong'."""
+    from tools.opensearch_tool import query_opensearch
+    summary = str(query_opensearch.invoke(
+        {"search": "FastEthernet interface down", "date_filter": "last 7 days"})["summary"])
+    assert "query_zabbix" in summary
+    assert "does NOT mean nothing is wrong" in summary
+
+
+def test_opensearch_plain_zero_is_not_a_device_redirect():
+    """An ordinary empty result should not lecture about network devices."""
+    from tools.opensearch_tool import query_opensearch
+    summary = str(query_opensearch.invoke(
+        {"search": "zzzznotarealtokenzzzz", "date_filter": "today"})["summary"])
+    assert "real zero" in summary and "query_zabbix" not in summary
+
+
+def test_opensearch_date_windows_differ():
+    """Guards the date parser: today and yesterday must not resolve the same."""
+    from tools.opensearch_tool import query_opensearch
+    today = query_opensearch.invoke({"date_filter": "today"})["raw"]["query"]
+    yesterday = query_opensearch.invoke({"date_filter": "yesterday"})["raw"]["query"]
+    assert today != yesterday
 
 
 def test_tools_state_their_limits_instead_of_fabricating():

@@ -10,11 +10,21 @@ MAX_TOOL_CALLS = 10
 PREVIEW_ROWS = 10
 
 ORCHESTRATOR_SYSTEM_PROMPT = """You are IQCore, an intelligent IT operations assistant.
-You have access to three systems, each covering DIFFERENT infrastructure:
+You have access to four systems, each covering DIFFERENT infrastructure:
 - Zabbix — network devices (routers, switches) and Windows hosts. Availability, SNMP, triggers.
 - Prometheus — the Linux server cluster (server01/02/03) and the services on it: MySQL,
   RabbitMQ, Elasticsearch, HAProxy, memcached, ProxySQL, containers, OpenStack, HTTP probes.
+- OpenSearch — LOG LINES from the OpenStack services (nova, neutron, keystone, glance,
+  cinder, heat, rabbit, haproxy) running on server01/02/03.
 - Zammad — the IT helpdesk: tickets, agents, SLA, states.
+
+## RULE -1 — "logs" does NOT always mean OpenSearch
+OpenSearch holds OpenStack APPLICATION logs only. It contains nothing about network
+devices: no Cisco, no interface up/down, no SNMP.
+- "logs for the OpenStack services / nova / neutron / keystone errors" → query_opensearch
+- "logs for a network device down / interface down / router" → query_zabbix
+  (query_type='problems' or 'alerts'); OpenSearch will return zero and that zero
+  means "not collected here", never "nothing is wrong".
 
 ## RULE 0 — Send infrastructure questions to the RIGHT monitoring system
 Zabbix and Prometheus do not watch the same machines. Choose by what is being asked about:
@@ -81,8 +91,28 @@ def complex_path_node(state: AgentState) -> AgentState:
     tool_call_count = 0
     final_answer = None
 
+    malformed_calls = 0
+
     while tool_call_count < MAX_TOOL_CALLS:
-        response = client.bind_tools(TOOL_SCHEMAS).invoke(messages)
+        try:
+            response = client.bind_tools(TOOL_SCHEMAS).invoke(messages)
+        except Exception as exc:
+            # The model sometimes emits a tool call Groq cannot parse. That is a
+            # bad generation, not a bad question — retry once, and if it happens
+            # again answer from whatever has already been gathered rather than
+            # losing the entire request.
+            if "tool_use_failed" not in str(exc):
+                raise
+            malformed_calls += 1
+            if malformed_calls == 1:
+                messages.append({
+                    "role": "user",
+                    "content": ("Your last tool call was malformed. Emit exactly one "
+                                "well-formed tool call, omitting any argument you do "
+                                "not need rather than passing null."),
+                })
+                continue
+            break
 
         if not response.tool_calls:
             final_answer = response.content
@@ -136,7 +166,20 @@ def complex_path_node(state: AgentState) -> AgentState:
             })
 
     if final_answer is None:
-        messages.append({"role": "user", "content": "You've reached the maximum tool calls. Summarize what you found so far."})
+        if malformed_calls > 1 and not tool_results_raw:
+            # Nothing was gathered and the model cannot produce a valid call.
+            state["final_answer"] = (
+                "I could not turn that into a valid query. Please rephrase it with the "
+                "system and time period stated explicitly — for example 'show me "
+                "OpenStack error logs for yesterday'.")
+            state["tools_called"] = tools_called
+            state["tool_results_raw"] = tool_results_raw
+            state["dataframes"] = dataframes
+            return state
+        closing = ("Answer the question from the tool results gathered so far."
+                   if malformed_calls else
+                   "You've reached the maximum tool calls. Summarize what you found so far.")
+        messages.append({"role": "user", "content": closing})
         response = client.invoke(messages)
         final_answer = response.content
 

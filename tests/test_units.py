@@ -10,11 +10,42 @@ import conftest  # noqa: F401  (path + env bootstrap)
 
 
 # --- wiring -----------------------------------------------------------------
-def test_all_five_tools_are_registered():
+def test_all_tools_are_registered():
     from agent.tool_registry import TOOL_REGISTRY
-    expected = {"query_zabbix", "query_zammad", "query_prometheus",
+    expected = {"query_zabbix", "query_zammad", "query_prometheus", "query_opensearch",
                 "correlate_problems_and_tickets", "lookup_ticket_context"}
     assert expected <= set(TOOL_REGISTRY), f"missing: {expected - set(TOOL_REGISTRY)}"
+
+
+def test_log_level_aliases_have_no_overlap():
+    """One spelling must map to exactly one severity, or counts double-count."""
+    from tools.clients import LOG_LEVEL_ALIASES
+    seen = {}
+    for canonical, variants in LOG_LEVEL_ALIASES.items():
+        for variant in variants:
+            assert variant not in seen, f"{variant!r} maps to both {seen[variant]} and {canonical}"
+            seen[variant] = canonical
+
+
+def test_log_level_canonicalisation():
+    from tools.clients import canonical_level
+    assert canonical_level("ERROR") == canonical_level("error") == "error"
+    assert canonical_level("WARN") == canonical_level("Warning") == "warning"
+    assert canonical_level("EMER") == "critical"
+
+
+def test_opensearch_date_parsing_without_network():
+    from tools.opensearch_tool import _time_range
+    today, today_label = _time_range("today")
+    assert today["gte"] == "now/d" and "today" in today_label
+    yesterday, _ = _time_range("yesterday")
+    assert yesterday == {"gte": "now-1d/d", "lt": "now/d"}
+    hours, label = _time_range("last 6 hours")
+    assert hours["gte"] == "now-6h" and "6" in label
+    exact, label = _time_range("2026-08-11")
+    assert exact["gte"].startswith("2026-08-11") and "2026-08-11" in label
+    default, _ = _time_range(None)
+    assert default["gte"] == "now/d", "no window given must default to today, not all time"
 
 
 def test_every_tool_exposes_a_usable_description():

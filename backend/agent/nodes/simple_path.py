@@ -28,18 +28,43 @@ def simple_path_node(state: AgentState) -> AgentState:
     if tool_schema:
         live_schema = fetch_live_metadata()
         system_msg = f"You are an argument extractor. Use the following live system schema to precisely map your arguments (e.g. host groups, ticket states) to the user's request. Do not hallucinate values outside this schema if a strict match is required.\n\n{live_schema}"
-        
-        fast_client = ChatGroq(model=FAST_MODEL, temperature=0)
-        bound_client = fast_client.bind_tools([tool_schema], tool_choice=tool_name)
+
         # Follow-ups like "and what about server02?" carry no subject of their own.
         # Without the prior turns the extractor has nothing to resolve them against.
-        response = bound_client.invoke(
-            [{"role": "system", "content": system_msg}]
-            + recent_turns(state.get("conversation_history"))
-            + [{"role": "user", "content": state["question"]}]
-        )
-        if response.tool_calls:
-            tool_args = response.tool_calls[0]["args"]
+        messages = ([{"role": "system", "content": system_msg}]
+                    + recent_turns(state.get("conversation_history"))
+                    + [{"role": "user", "content": state["question"]}])
+
+        # The small model occasionally emits a malformed tool call, which Groq
+        # rejects with tool_use_failed. One bad generation should not fail the
+        # whole request, so escalate to the larger model rather than give up.
+        extracted = False
+        for model in (FAST_MODEL, SYNTHESIS_MODEL):
+            try:
+                client = ChatGroq(model=model, temperature=0)
+                response = client.bind_tools([tool_schema], tool_choice=tool_name).invoke(messages)
+                if response.tool_calls:
+                    tool_args = response.tool_calls[0]["args"]
+                    extracted = True
+                    break
+            except Exception as exc:
+                if "tool_use_failed" not in str(exc) and "400" not in str(exc):
+                    raise      # rate limits and outages should surface, not retry
+                continue
+
+        if not extracted:
+            # Falling through to the tool's defaults would silently answer a
+            # different question — "what about yesterday?" would return today's
+            # data and look correct. Better to say the query could not be built.
+            state["final_answer"] = (
+                "I could not turn that into a valid query for "
+                f"{tool_name.replace('query_', '').title()}. Please rephrase it, "
+                "stating the system and time period explicitly — for example "
+                "'show me OpenStack error logs for yesterday'.")
+            state["tools_called"] = []
+            state["tool_results_raw"] = [{"tool": tool_name, "args": None,
+                                          "result": {"error": "argument extraction failed"}}]
+            return state
 
     try:
         result = tool_entry["function"].invoke(tool_args)

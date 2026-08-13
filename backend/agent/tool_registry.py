@@ -1,12 +1,14 @@
 from tools.zammad_tool import query_zammad
 from tools.zabbix_tool import query_zabbix
 from tools.prometheus_tool import query_prometheus
+from tools.opensearch_tool import query_opensearch
 from tools.correlation import correlate_problems_and_tickets, lookup_ticket_context
 
 LANGCHAIN_TOOLS = [
     query_zammad,
     query_zabbix,
     query_prometheus,
+    query_opensearch,
     correlate_problems_and_tickets,
     lookup_ticket_context,
 ]

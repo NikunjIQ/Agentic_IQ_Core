@@ -83,6 +83,21 @@ PROMETHEUS_QUERIES = [
     ("containers", {"metric": "containers"}, "cAdvisor"),
 ]
 
+# --- OpenSearch: OpenStack application logs ---------------------------------
+OPENSEARCH_QUERIES = [
+    ("logs for today", {}, "for today"),
+    ("logs for yesterday", {"date_filter": "yesterday"}, "for yesterday"),
+    ("logs for last 2 hours", {"date_filter": "last 2 hours"}, "last 2 hour"),
+    ("logs for an exact date", {"date_filter": "2026-08-11"}, "on 2026-08-11"),
+    ("full text search", {"search": "rabbit", "date_filter": "last 7 days"}, "matching 'rabbit'"),
+    ("errors only", {"log_level": "error", "date_filter": "last 7 days"}, "level error"),
+    ("one service", {"service": "nova-api"}, "service 'nova-api'"),
+    ("one host", {"host_filter": "server02"}, "host 'server02'"),
+    ("breakdown by service", {"group_by": "service"}, "BREAKDOWN BY SERVICE"),
+    ("breakdown by hour", {"group_by": "hour"}, "BY HOUR"),
+    ("breakdown by level", {"group_by": "level"}, "BREAKDOWN BY LEVEL"),
+]
+
 # Limits the tools must state rather than paper over. Each entry is
 # (tool arguments, phrase that must appear). These guard the honesty of the
 # answers — the failure mode they prevent is confident fabrication.
