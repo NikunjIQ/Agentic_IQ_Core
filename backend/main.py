@@ -11,7 +11,7 @@ import pandas as pd
 import numpy as np
 
 from agent.graph import COMPILED_GRAPH
-from agent import answer_cache
+from agent import answer_cache, config_store, config_test
 
 load_dotenv()
 
@@ -20,6 +20,10 @@ os.environ["LANGCHAIN_TRACING_V2"] = "false"
 os.environ["LANGCHAIN_API_KEY"] = ""
 
 app = FastAPI(title="IQCore Agent API")
+
+# Credentials saved through the UI take precedence over .env, so a configured
+# instance keeps its settings across restarts.
+_applied = config_store.apply_to_environment()
 
 class ChatRequest(BaseModel):
     question: str
@@ -142,6 +146,49 @@ async def chat(request: ChatRequest):
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+class ConfigRequest(BaseModel):
+    values: dict = {}
+    systems: list[str] = []
+
+
+@app.get("/config")
+async def get_config():
+    """Current settings, secrets masked, plus the field layout for the UI."""
+    return {
+        "configured": config_store.is_configured(),
+        "values": config_store.masked(),
+        "groups": [
+            {"system": system, "description": description,
+             "fields": [{"key": key, "label": label, "secret": secret,
+                         "placeholder": placeholder}
+                        for key, label, secret, placeholder in fields]}
+            for system, description, fields in config_store.FIELD_GROUPS
+        ],
+        "path": str(config_store.CONFIG_PATH),
+    }
+
+
+@app.post("/config/test")
+async def test_config(request: ConfigRequest):
+    """Check credentials WITHOUT saving them.
+
+    Values already stored are merged underneath, so a user testing one changed
+    field does not have to retype every masked secret.
+    """
+    merged = {**config_store.load(), **{k: v for k, v in request.values.items()
+                                        if str(v or "").strip()}}
+    return {"results": config_test.test_all(merged, request.systems or None)}
+
+
+@app.post("/config")
+async def save_config(request: ConfigRequest):
+    """Persist credentials, apply them, and drop caches from the old ones."""
+    result = config_store.save(request.values)
+    merged = config_store.load()
+    result["results"] = config_test.test_all(merged, request.systems or None)
+    return result
 
 
 @app.get("/cache")

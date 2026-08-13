@@ -193,6 +193,122 @@ def test_cache_evicts_rather_than_growing_forever():
     assert answer_cache.stats()["entries"] <= answer_cache.MAX_ENTRIES
 
 
+# --- credential store (offline; uses a throwaway path) ----------------------
+import contextlib
+
+
+@contextlib.contextmanager
+def _isolated_store(tmp_name="iqcore_test_creds.json"):
+    """A scratch credential file, with the process environment put back after.
+
+    save() deliberately writes into os.environ — that is how a saved config
+    reaches the tools. In a test that side effect leaks: fake hostnames like
+    zbx.example escaped into the live tool tests running later in the same
+    process and broke them. Snapshot and restore.
+    """
+    import os, tempfile, importlib
+    from agent import config_store as store
+
+    saved_env = {key: os.environ.get(key) for key in store.ALL_KEYS}
+    saved_path = os.environ.get("IQCORE_CONFIG_PATH")
+    path = os.path.join(tempfile.gettempdir(), tmp_name)
+    if os.path.exists(path):
+        os.remove(path)
+
+    os.environ["IQCORE_CONFIG_PATH"] = path
+    importlib.reload(store)
+    try:
+        yield store, path
+    finally:
+        for key, value in saved_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        if saved_path is None:
+            os.environ.pop("IQCORE_CONFIG_PATH", None)
+        else:
+            os.environ["IQCORE_CONFIG_PATH"] = saved_path
+        importlib.reload(store)
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def test_config_store_saves_and_reloads():
+    with _isolated_store() as (store, _):
+        assert store.is_configured() is False
+        store.save({"ZABBIX_URL": "http://zbx.example:8080",
+                    "ZABBIX_API_TOKEN": "secret-token"})
+        assert store.is_configured() is True
+        assert store.load()["ZABBIX_URL"] == "http://zbx.example:8080"
+
+
+def test_config_store_blank_means_unchanged():
+    """The UI shows masked secrets; blank must not wipe the stored value."""
+    with _isolated_store("iqcore_test_creds2.json") as (store, _):
+        store.save({"ZABBIX_API_TOKEN": "keep-me", "ZABBIX_URL": "http://a"})
+        store.save({"ZABBIX_API_TOKEN": "", "ZABBIX_URL": "http://b"})
+        config = store.load()
+        assert config["ZABBIX_API_TOKEN"] == "keep-me", "blank erased a stored secret"
+        assert config["ZABBIX_URL"] == "http://b"
+
+
+def test_config_store_masks_secrets_but_not_urls():
+    with _isolated_store("iqcore_test_creds3.json") as (store, _):
+        store.save({"ZABBIX_URL": "http://zbx.example:8080",
+                    "ZABBIX_API_TOKEN": "abcdefghijklmnop"})
+        masked = store.masked()
+        assert masked["ZABBIX_URL"] == "http://zbx.example:8080", "URLs stay readable"
+        assert "abcdefghijklmnop" not in masked["ZABBIX_API_TOKEN"]
+        assert masked["ZABBIX_API_TOKEN"].endswith("mnop"), "last 4 chars aid recognition"
+
+
+def test_config_store_applies_to_environment():
+    """Tools read os.getenv at call time, so saving must update the process env."""
+    import os
+    with _isolated_store("iqcore_test_creds4.json") as (store, _):
+        store.save({"PROMETHEUS_URL": "http://prom.example:9090"})
+        assert os.environ["PROMETHEUS_URL"] == "http://prom.example:9090"
+
+
+def test_config_store_restores_environment_after_use():
+    """The isolation helper itself must not leak fake hosts into later tests."""
+    import os
+    before = os.environ.get("ZABBIX_URL")
+    with _isolated_store("iqcore_test_creds6.json") as (store, _):
+        store.save({"ZABBIX_URL": "http://leaked.example:8080"})
+    assert os.environ.get("ZABBIX_URL") == before, "test isolation leaked into the process"
+
+
+def test_config_save_clears_every_cache():
+    """Stale data from the previous credentials would look like a silent failure."""
+    with _isolated_store("iqcore_test_creds5.json") as (store, _):
+        result = store.save({"ZAMMAD_URL": "http://zammad.example"})
+        for expected in ("zammad tickets", "prometheus nodes", "live schema",
+                         "device index", "answers"):
+            assert expected in result["caches_cleared"], f"{expected} cache not cleared"
+
+
+def test_config_field_groups_cover_every_system():
+    from agent import config_store
+    systems = {group[0] for group in config_store.FIELD_GROUPS}
+    assert systems == {"Zabbix", "Zammad", "Prometheus", "OpenSearch", "Groq"}
+    for key in ("ZABBIX_API_TOKEN", "ZAMMAD_PASS", "PROMETHEUS_PASS",
+                "OPENSEARCH_PASS", "GROQ_API_KEY"):
+        assert key in config_store.SECRET_KEYS, f"{key} must be treated as a secret"
+
+
+def test_config_test_messages_are_actionable():
+    """Error text should say what to change, not name a Python exception."""
+    from agent.config_test import _describe
+    import requests
+    assert "http://" in _describe(requests.exceptions.InvalidSchema("x"))
+    assert "not with JSON" in _describe(ValueError("JSONDecodeError: Expecting value"))
+    assert "could not connect" in _describe(requests.exceptions.ConnectionError("x"))
+
+
 def test_cache_reports_stats():
     from agent import answer_cache
     answer_cache.clear()
