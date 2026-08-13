@@ -11,6 +11,7 @@ import pandas as pd
 import numpy as np
 
 from agent.graph import COMPILED_GRAPH
+from agent import answer_cache
 
 load_dotenv()
 
@@ -70,6 +71,10 @@ def _explain_failure(error: Exception) -> str:
 
 @app.post("/chat")
 async def chat(request: ChatRequest):
+    cached = answer_cache.get(request.question, request.conversation_history)
+    if cached is not None:
+        return JSONResponse(content=cached)
+
     initial_state = {
         "question": request.question,
         "conversation_history": request.conversation_history,
@@ -113,7 +118,11 @@ async def chat(request: ChatRequest):
     try:
         clean_payload = safe_serialize(payload)
         json_str = json.dumps(clean_payload, default=str)
-        return JSONResponse(content=json.loads(json_str))
+        serialised = json.loads(json_str)
+        # Cache only what actually serialised — anything stored here is replayed
+        # verbatim, so it has to be known-good JSON.
+        answer_cache.put(request.question, serialised, request.conversation_history)
+        return JSONResponse(content=serialised)
     except Exception as exc:
         # The answer is already computed; never lose it to a serialisation problem
         # in the debug payload.
@@ -128,5 +137,17 @@ async def chat(request: ChatRequest):
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.get("/cache")
+async def cache_stats():
+    """Cache hit rate — the cheapest signal for how much token spend is avoided."""
+    return answer_cache.stats()
+
+
+@app.post("/cache/clear")
+async def cache_clear():
+    answer_cache.clear()
+    return {"status": "cleared"}
 
 

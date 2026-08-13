@@ -423,11 +423,13 @@ def query_zabbix(
                 
             alerts = rpc("alert.get", params)
             df = pd.DataFrame(alerts)
+            # Scope and the problems/alerts caveat belong on the empty answer too —
+            # "0 alerts today" is a different statement from "0 alerts ever".
+            scope = "sent today" if date_filter and "today" in date_filter.lower() else "in total (all time)"
             if not df.empty:
                 df['clock'] = pd.to_numeric(df['clock'], errors='coerce')
                 df['clock_dt'] = pd.to_datetime(df['clock'], unit='s')
 
-                scope = "sent today" if date_filter and "today" in date_filter.lower() else "in total (all time)"
                 summary = f"Alerts {scope}: {len(alerts)}. "
 
                 # An alert is a notification Zabbix tried to deliver, not a live
@@ -446,7 +448,10 @@ def query_zabbix(
                 details = [f"{a.get('subject', '')}" for a in alerts[:5]]
                 summary += "Most recent: " + " | ".join(details)
             else:
-                summary = "Total alerts found: 0."
+                summary = (f"Alerts {scope}: 0. No notifications matched. "
+                           f"NOTE: alerts are notification records, not live conditions — "
+                           f"zero alerts does NOT mean nothing is wrong. For current problems "
+                           f"use query_type='problems'.")
             raw = {"alerts": alerts}
             
         elif q_type == "triggers":

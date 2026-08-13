@@ -2,6 +2,7 @@ import json
 from langchain_groq import ChatGroq
 from agent.state import AgentState
 from agent.tool_registry import TOOL_REGISTRY
+from agent.history import recent_turns
 
 CLASSIFY_MODEL = "llama-3.1-8b-instant"
 
@@ -29,10 +30,13 @@ def classify_node(state: AgentState) -> AgentState:
     tool_descriptions = "\n".join(f"- {name}: {entry['description']}" for name, entry in TOOL_REGISTRY.items())
     prompt = CLASSIFY_PROMPT.format(tool_descriptions=tool_descriptions)
 
-    response = client.invoke([
-        {"role": "system", "content": prompt},
-        {"role": "user", "content": state["question"]},
-    ])
+    # A follow-up ("and server02?") is unroutable on its own — the system it
+    # belongs to lives in the previous turn.
+    response = client.invoke(
+        [{"role": "system", "content": prompt}]
+        + recent_turns(state.get("conversation_history"), max_turns=4)
+        + [{"role": "user", "content": state["question"]}]
+    )
 
     try:
         parsed = json.loads(response.content)

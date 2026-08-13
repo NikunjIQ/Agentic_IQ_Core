@@ -5,6 +5,7 @@ from agent.state import AgentState
 from agent.tool_registry import TOOL_REGISTRY
 from agent.tool_schemas import TOOL_SCHEMAS
 from agent.metadata import fetch_live_metadata
+from agent.history import recent_turns
 
 SYNTHESIS_MODEL = "llama-3.3-70b-versatile"
 # Argument extraction is a constrained task — the schema is forced via tool_choice,
@@ -30,10 +31,13 @@ def simple_path_node(state: AgentState) -> AgentState:
         
         fast_client = ChatGroq(model=FAST_MODEL, temperature=0)
         bound_client = fast_client.bind_tools([tool_schema], tool_choice=tool_name)
-        response = bound_client.invoke([
-            {"role": "system", "content": system_msg},
-            {"role": "user", "content": state["question"]}
-        ])
+        # Follow-ups like "and what about server02?" carry no subject of their own.
+        # Without the prior turns the extractor has nothing to resolve them against.
+        response = bound_client.invoke(
+            [{"role": "system", "content": system_msg}]
+            + recent_turns(state.get("conversation_history"))
+            + [{"role": "user", "content": state["question"]}]
+        )
         if response.tool_calls:
             tool_args = response.tool_calls[0]["args"]
 
@@ -59,10 +63,11 @@ def simple_path_node(state: AgentState) -> AgentState:
         df_context = f"\n\nData Table (First 10 rows):\n{result['dataframe'].head(10).to_string()}"
         
     client = ChatGroq(model=SYNTHESIS_MODEL, temperature=0)
-    response = client.invoke([
-        {"role": "system", "content": f"You are IQCore, an IT operations assistant. Current Date: {current_date}. Answer the user's question accurately using the tool result provided. Pay strict attention to dates (e.g. today vs yesterday vs historical years like 2025). Include actual values, counts, and names."},
-        {"role": "user", "content": f"Question: {state['question']}\n\nTool args used: {json.dumps(tool_args)}\n\nTool result: {result['summary']}{df_context}"},
-    ])
+    response = client.invoke(
+        [{"role": "system", "content": f"You are IQCore, an IT operations assistant. Current Date: {current_date}. Answer the user's question accurately using the tool result provided. Pay strict attention to dates (e.g. today vs yesterday vs historical years like 2025). Include actual values, counts, and names."}]
+        + recent_turns(state.get("conversation_history"))
+        + [{"role": "user", "content": f"Question: {state['question']}\n\nTool args used: {json.dumps(tool_args)}\n\nTool result: {result['summary']}{df_context}"}]
+    )
     state["final_answer"] = response.content
     return state
 
