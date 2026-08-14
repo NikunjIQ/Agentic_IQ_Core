@@ -41,10 +41,17 @@ SEVERITY_LABELS = {
 TICKET_ID_TAG = "__zbx_zammad_ticket_id"
 TICKET_LINK_TAG = "__zbx_zammad_ticketlink"
 
-# Pulling the whole ticket estate takes ~12s. A question that needs two cuts of
+# Pulling the whole ticket estate takes 12-30s. A question that needs two cuts of
 # the same data should not pay for it twice.
+#
+# 60s is deliberately short for the running app: this is monitoring data and an
+# answer should not be built on a stale estate. The eval suite raises it via
+# ZAMMAD_CACHE_TTL, because a dozen Zammad checks in one run would otherwise
+# re-download 3,788 tickets four or five times. That is a test concern only —
+# changing the default would trade the app's freshness for speed, which is a
+# separate decision.
 _TICKET_CACHE = {"tickets": None, "fetched_at": 0.0}
-TICKET_CACHE_TTL = 60
+TICKET_CACHE_TTL = int(os.getenv("ZAMMAD_CACHE_TTL", "60"))
 
 
 def _ticket_cache_get():
