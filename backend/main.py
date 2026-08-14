@@ -12,7 +12,7 @@ import pandas as pd
 import numpy as np
 
 from agent.graph import COMPILED_GRAPH
-from agent import answer_cache, config_store, config_test, streaming
+from agent import answer_cache, config_store, config_test, streaming, suggestions
 
 load_dotenv()
 
@@ -124,13 +124,19 @@ def _serialise_state(result_state: dict) -> dict:
         elif isinstance(df, (dict, list)):
             serialized_dfs.append(df)
 
+    tools_called = result_state.get("tools_called") or []
+    raw = result_state.get("tool_results_raw") or []
+
     payload = {
         "final_answer": result_state.get("final_answer") or "",
         "dataframes": serialized_dfs,
-        "tools_called": result_state.get("tools_called") or [],
-        "tool_results_raw": result_state.get("tool_results_raw") or [],
+        "tools_called": tools_called,
+        "tool_results_raw": raw,
         "complexity": result_state.get("complexity") or "unknown",
         "guard_notes": result_state.get("guard_notes") or [],
+        # Deterministic follow-ups — no model call, so these are free.
+        "suggestions": suggestions.suggest(
+            tools_called, suggestions.looks_empty(serialized_dfs, raw)),
     }
 
     try:
@@ -145,6 +151,7 @@ def _serialise_state(result_state: dict) -> dict:
             "tool_results_raw": [{"error": f"Could not serialise debug data: {exc}"}],
             "complexity": payload["complexity"],
             "guard_notes": payload["guard_notes"],
+            "suggestions": payload["suggestions"],
         }
 
 @app.get("/health")

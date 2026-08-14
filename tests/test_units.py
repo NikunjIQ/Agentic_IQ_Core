@@ -201,6 +201,56 @@ def test_cache_evicts_rather_than_growing_forever():
     assert answer_cache.stats()["entries"] <= answer_cache.MAX_ENTRIES
 
 
+# --- follow-up suggestions --------------------------------------------------
+def test_suggestions_are_relevant_to_the_tool_that_ran():
+    from agent.suggestions import suggest
+    assert "ticket" in " ".join(suggest(["query_zabbix"])).lower()
+    assert "device" in " ".join(suggest(["query_zammad"])).lower()
+    assert suggest(["query_prometheus"]), "no follow-ups after a Prometheus query"
+
+
+def test_suggestions_are_capped_and_unique():
+    from agent.suggestions import suggest, MAX_SUGGESTIONS
+    many = suggest(["query_zabbix", "query_zammad", "query_prometheus",
+                    "query_opensearch"])
+    assert len(many) <= MAX_SUGGESTIONS
+    assert len(many) == len(set(many))
+
+
+def test_no_suggestions_after_a_clarifying_question():
+    """The app has just asked something; chips underneath would compete with it."""
+    from agent.suggestions import suggest
+    assert suggest(["clarify"]) == []
+    assert suggest([]) == []
+    assert suggest(None) == []
+
+
+def test_empty_results_suggest_widening_instead():
+    from agent.suggestions import suggest
+    widen = " ".join(suggest(["query_opensearch"], result_was_empty=True)).lower()
+    assert "widen" in widen or "all log levels" in widen
+
+
+def test_empty_result_still_suggests_something():
+    """Not every tool has widening advice — fall back rather than show nothing."""
+    from agent.suggestions import suggest
+    assert suggest(["lookup_ticket_context"], result_was_empty=True)
+
+
+def test_suggestions_cost_no_model_call():
+    import inspect
+    from agent import suggestions
+    source = inspect.getsource(suggestions)
+    assert "ChatGroq" not in source and "invoke" not in source, \
+        "suggestions must stay deterministic — a chip that costs tokens is not free"
+
+
+def test_suggestions_reach_the_payload():
+    import inspect
+    import main
+    assert "suggestions.suggest" in inspect.getsource(main._serialise_state)
+
+
 # --- answer style -----------------------------------------------------------
 def test_style_names_the_system_actually_queried():
     """The model copied 'e.g. Checked Zabbix' onto a Zammad answer, so the real

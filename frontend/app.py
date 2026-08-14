@@ -12,6 +12,10 @@ if "conversation_history" not in st.session_state:
     st.session_state.conversation_history = []
 if "test_results" not in st.session_state:
     st.session_state.test_results = {}
+if "suggestions" not in st.session_state:
+    st.session_state.suggestions = []
+if "pending_question" not in st.session_state:
+    st.session_state.pending_question = None
 
 
 def backend(method: str, path: str, **kwargs):
@@ -135,7 +139,12 @@ for message in st.session_state.conversation_history:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-if user_input := st.chat_input("Ask about tickets, infrastructure, VMs or logs..."):
+typed = st.chat_input("Ask about tickets, infrastructure, VMs or logs...")
+# A clicked suggestion is just a question the user did not have to type.
+user_input = st.session_state.pending_question or typed
+st.session_state.pending_question = None
+
+if user_input:
     with st.chat_message("user"):
         st.markdown(user_input)
 
@@ -168,6 +177,21 @@ if user_input := st.chat_input("Ask about tickets, infrastructure, VMs or logs..
                 {"role": "user", "content": user_input},
                 {"role": "assistant", "content": answer or result.get("final_answer", "")},
             ]
+            st.session_state.suggestions = result.get("suggestions", [])
         except Exception as exc:
             status_holder.empty()
+            st.session_state.suggestions = []
             st.error(f"Error communicating with backend: {exc}")
+
+# Follow-ups for the most recent answer. Rendered outside the message block so
+# they survive the rerun a click causes, and computed by the backend with no
+# model call — a chip costs nothing to offer.
+if st.session_state.suggestions:
+    st.caption("Next:")
+    columns = st.columns(len(st.session_state.suggestions))
+    for column, suggestion in zip(columns, st.session_state.suggestions):
+        if column.button(suggestion, key=f"chip_{hash(suggestion)}",
+                         use_container_width=True):
+            st.session_state.pending_question = suggestion
+            st.session_state.suggestions = []
+            st.rerun()
