@@ -1,10 +1,29 @@
 import json
+import os
 
 import requests
 import pandas as pd
 import streamlit as st
 
-BACKEND_URL = st.secrets.get("backend_url", "http://localhost:8000")
+def _backend_url() -> str:
+    """Where the API lives, in order of preference.
+
+    st.secrets RAISES when no secrets.toml exists anywhere — the .get() default
+    only covers a missing key, not a missing file. secrets.toml is gitignored, so
+    a fresh clone has none and the app crashed on import before rendering
+    anything. Environment variable first so a VM can point elsewhere without
+    creating the file at all.
+    """
+    from_env = os.getenv("IQCORE_BACKEND_URL", "").strip()
+    if from_env:
+        return from_env
+    try:
+        return st.secrets.get("backend_url", "http://localhost:8000")
+    except Exception:
+        return "http://localhost:8000"
+
+
+BACKEND_URL = _backend_url()
 
 st.set_page_config(page_title="IQCore", layout="wide")
 
