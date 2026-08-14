@@ -5,7 +5,7 @@ from agent.tool_registry import TOOL_REGISTRY
 from agent.tool_schemas import TOOL_SCHEMAS
 from agent.metadata import fetch_live_metadata
 from agent.arg_guard import scrub
-from agent import streaming, clarify
+from agent import streaming, clarify, coverage
 from agent.voice import (CONVERSATIONAL_STYLE, CONVERSATIONAL_STYLE_BRIEF,
                          system_for_tools)
 
@@ -101,6 +101,7 @@ def complex_path_node(state: AgentState) -> AgentState:
 
     malformed_calls = 0
     guard_notes = []
+    coverage_notes = []
 
     while tool_call_count < MAX_TOOL_CALLS:
         try:
@@ -162,18 +163,17 @@ def complex_path_node(state: AgentState) -> AgentState:
             if result.get("dataframe") is not None:
                 dataframes.append(result["dataframe"])
 
-            df_context = ""
-            frame = result.get("dataframe")
-            if frame is not None and not frame.empty:
-                # Say so when rows are being withheld. Without this the model reads a
-                # truncated table as the whole result set and reports confident,
-                # undercounted answers.
-                if len(frame) > PREVIEW_ROWS:
-                    header = (f"Data Table (showing {PREVIEW_ROWS} of {len(frame)} rows — "
-                              f"do NOT count from this preview, use the totals in the summary above)")
-                else:
-                    header = f"Data Table (all {len(frame)} rows)"
-                df_context = f"\n\n{header}:\n{frame.head(PREVIEW_ROWS).to_string()}"
+            df_context = coverage.describe_table(result.get("dataframe"), PREVIEW_ROWS)
+
+            # An empty result can mean "nothing is wrong" or "this system holds no
+            # data of that kind at all". Those are very different answers, and only
+            # the second one is dangerous to report as a clean bill of health.
+            if coverage.looks_empty(result):
+                note = coverage.empty_result_note(tool_name, state["question"],
+                                                  str(result.get("summary", "")))
+                if note:
+                    df_context += "\n\nIMPORTANT — state this in your answer: " + note
+                    coverage_notes.append(note)
 
             messages.append({
                 "role": "tool",
@@ -209,4 +209,6 @@ def complex_path_node(state: AgentState) -> AgentState:
     state["dataframes"] = dataframes
     if guard_notes:
         state["guard_notes"] = guard_notes
+    if coverage_notes:
+        state["coverage_notes"] = coverage_notes
     return state

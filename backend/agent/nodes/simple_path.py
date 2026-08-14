@@ -7,7 +7,7 @@ from agent.tool_schemas import TOOL_SCHEMAS
 from agent.metadata import fetch_live_metadata
 from agent.history import recent_turns
 from agent.arg_guard import scrub
-from agent import streaming, clarify
+from agent import streaming, clarify, coverage
 from agent.voice import CONVERSATIONAL_STYLE, system_for_tools
 
 SYNTHESIS_MODEL = "llama-3.3-70b-versatile"
@@ -100,10 +100,21 @@ def simple_path_node(state: AgentState) -> AgentState:
 
     current_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     
-    df_context = ""
-    if result.get("dataframe") is not None and not result["dataframe"].empty:
-        df_context = f"\n\nData Table (First 10 rows):\n{result['dataframe'].head(10).to_string()}"
-        
+    # Previously this said "First 10 rows" without saying how many there were, so
+    # the model could not know it was reading a truncated table and answered as
+    # though it had seen everything.
+    df_context = coverage.describe_table(result.get("dataframe"))
+
+    gaps = []
+    if coverage.looks_empty(result):
+        note = coverage.empty_result_note(tool_name, state["question"],
+                                          str(result.get("summary", "")))
+        if note:
+            gaps.append(note)
+    if gaps:
+        df_context += "\n\nIMPORTANT — state this in your answer: " + " ".join(gaps)
+        state["coverage_notes"] = gaps
+
     streaming.status("Writing the answer…")
     client = ChatGroq(model=SYNTHESIS_MODEL, temperature=0)
     state["final_answer"] = streaming.stream_text(client,

@@ -201,6 +201,82 @@ def test_cache_evicts_rather_than_growing_forever():
     assert answer_cache.stats()["entries"] <= answer_cache.MAX_ENTRIES
 
 
+# --- saying what was not seen -----------------------------------------------
+def test_truncated_table_says_how_many_rows_were_hidden():
+    """The simple path used to say only 'First 10 rows', so the model could not
+    know it was reading part of a table and answered as if it had seen it all."""
+    import pandas as pd
+    from agent.coverage import describe_table
+    header = describe_table(pd.DataFrame({"a": range(48)})).strip().splitlines()[0]
+    assert "10 of 48" in header
+    assert "do NOT count" in header
+
+
+def test_untruncated_table_says_it_is_complete():
+    import pandas as pd
+    from agent.coverage import describe_table
+    assert "all 4 rows" in describe_table(pd.DataFrame({"a": range(4)}))
+    assert describe_table(pd.DataFrame()) == ""
+    assert describe_table(None) == ""
+
+
+def test_empty_opensearch_result_about_a_router_is_explained():
+    """Zero there means 'not collected', never 'the network is healthy'."""
+    from agent.coverage import empty_result_note
+    note = empty_result_note("query_opensearch",
+                             "show me logs for router 192.168.1.73", "No logs found")
+    assert "not collected" in note.lower()
+    assert "zabbix" in note.lower()
+
+
+def test_a_genuine_zero_gets_no_spurious_explanation():
+    from agent.coverage import empty_result_note
+    assert empty_result_note("query_opensearch", "keystone errors today", "No logs") == ""
+    assert empty_result_note("query_zabbix", "how many hosts are down", "0 hosts") == ""
+
+
+def test_partial_coverage_named_only_for_broad_questions():
+    from agent.coverage import coverage_note
+    broad = coverage_note(["query_zabbix"], "is everything ok")
+    assert "Not checked" in broad and "Prometheus" in broad
+    assert coverage_note(["query_zabbix"], "how many hosts are down") == ""
+    assert coverage_note([], "is everything ok") == ""
+
+
+def test_empty_detection_handles_missing_pieces():
+    import pandas as pd
+    from agent.coverage import looks_empty
+    assert looks_empty({}) is True
+    assert looks_empty({"dataframe": pd.DataFrame()}) is True
+    assert looks_empty({"dataframe": pd.DataFrame({"a": [1]})}) is False
+    assert looks_empty({"raw": {"hosts": [1, 2]}}) is False
+
+
+def test_request_metadata_is_not_mistaken_for_results():
+    """raw always carries the query that produced it; counting that as data made
+    every empty OpenSearch result look populated."""
+    import pandas as pd
+    from agent.coverage import looks_empty
+    opensearch_empty = {"dataframe": pd.DataFrame(),
+                        "raw": {"query": {"bool": {"filter": [1, 2]}}, "total": 0}}
+    assert looks_empty(opensearch_empty) is True
+    prometheus_empty = {"dataframe": pd.DataFrame(),
+                        "raw": {"promql": "up{job='x'}", "rows": []}}
+    assert looks_empty(prometheus_empty) is True
+    assert looks_empty({"dataframe": pd.DataFrame(),
+                        "raw": {"query": {"x": 1}, "total": 12}}) is False
+
+
+def test_both_paths_report_what_was_not_seen():
+    import inspect
+    from agent.nodes import simple_path, complex_path
+    for module in (simple_path, complex_path):
+        source = inspect.getsource(module)
+        assert "coverage.describe_table" in source, \
+            f"{module.__name__} does not label truncated tables"
+        assert "coverage.looks_empty" in source
+
+
 # --- follow-up suggestions --------------------------------------------------
 def test_suggestions_are_relevant_to_the_tool_that_ran():
     from agent.suggestions import suggest

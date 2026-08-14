@@ -134,6 +134,7 @@ def _serialise_state(result_state: dict) -> dict:
         "tool_results_raw": raw,
         "complexity": result_state.get("complexity") or "unknown",
         "guard_notes": result_state.get("guard_notes") or [],
+        "coverage_notes": result_state.get("coverage_notes") or [],
         # Deterministic follow-ups — no model call, so these are free.
         "suggestions": suggestions.suggest(
             tools_called, suggestions.looks_empty(serialized_dfs, raw)),
@@ -151,6 +152,7 @@ def _serialise_state(result_state: dict) -> dict:
             "tool_results_raw": [{"error": f"Could not serialise debug data: {exc}"}],
             "complexity": payload["complexity"],
             "guard_notes": payload["guard_notes"],
+            "coverage_notes": payload["coverage_notes"],
             "suggestions": payload["suggestions"],
         }
 
