@@ -116,3 +116,4 @@ def normalise_axis(value) -> str:
     """Accept only a known axis; anything else means 'do not ask'."""
     text = str(value or "").strip().lower()
     return text if text in AXES else ""
+

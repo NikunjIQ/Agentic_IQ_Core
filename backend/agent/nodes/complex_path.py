@@ -6,6 +6,8 @@ from agent.tool_schemas import TOOL_SCHEMAS
 from agent.metadata import fetch_live_metadata
 from agent.arg_guard import scrub
 from agent import streaming, clarify
+from agent.voice import (CONVERSATIONAL_STYLE, CONVERSATIONAL_STYLE_BRIEF,
+                         system_for_tools)
 
 REASONING_MODEL = "llama-3.3-70b-versatile"
 MAX_TOOL_CALLS = 10
@@ -72,6 +74,9 @@ say plainly that the two were not joined automatically.
 - If a table says it was truncated, say your answer covers only the rows you saw.
 - If you genuinely cannot answer, say so clearly.
 
+## RULE 4 — How the answer should read
+{style}
+
 Live System Schema (use EXACT values from this list when extracting arguments):
 {live_schema}
 """
@@ -80,7 +85,8 @@ def complex_path_node(state: AgentState) -> AgentState:
     client = ChatGroq(model=REASONING_MODEL, temperature=0)
 
     live_schema = fetch_live_metadata()
-    system_content = ORCHESTRATOR_SYSTEM_PROMPT.format(live_schema=live_schema)
+    system_content = ORCHESTRATOR_SYSTEM_PROMPT.format(
+        live_schema=live_schema, style=CONVERSATIONAL_STYLE_BRIEF)
 
     messages = [{"role": "system", "content": system_content}]
     messages += state["conversation_history"]
@@ -190,7 +196,10 @@ def complex_path_node(state: AgentState) -> AgentState:
         closing = ("Answer the question from the tool results gathered so far."
                    if malformed_calls else
                    "You've reached the maximum tool calls. Summarize what you found so far.")
-        messages.append({"role": "user", "content": closing})
+        # The full style guidance is affordable here — this closing call happens
+        # once, unlike the system prompt which is resent every iteration.
+        messages.append({"role": "user",
+                         "content": f"{closing}\n\n{CONVERSATIONAL_STYLE}"})
         streaming.status("Writing the answer…")
         final_answer = streaming.stream_text(client, messages)
 

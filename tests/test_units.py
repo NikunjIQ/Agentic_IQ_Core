@@ -201,6 +201,53 @@ def test_cache_evicts_rather_than_growing_forever():
     assert answer_cache.stats()["entries"] <= answer_cache.MAX_ENTRIES
 
 
+# --- answer style -----------------------------------------------------------
+def test_style_names_the_system_actually_queried():
+    """The model copied 'e.g. Checked Zabbix' onto a Zammad answer, so the real
+    system is supplied as a fact rather than shown as an example."""
+    from agent.voice import system_for_tools
+    assert system_for_tools("query_zammad") == "Zammad"
+    assert system_for_tools("query_prometheus") == "Prometheus"
+    assert system_for_tools(["query_zabbix", "query_zammad"]) == "Zabbix and Zammad"
+    assert system_for_tools([]) == ""
+    assert system_for_tools("not_a_tool") == ""
+
+
+def test_style_contains_no_copyable_system_example():
+    """Three separate bugs came from a concrete example being reproduced verbatim."""
+    from agent.voice import CONVERSATIONAL_STYLE, CONVERSATIONAL_STYLE_BRIEF
+    for text in (CONVERSATIONAL_STYLE, CONVERSATIONAL_STYLE_BRIEF):
+        assert "Checked Zabbix" not in text, "a copyable system name is back in the style"
+
+
+def test_style_asks_for_the_three_beats():
+    from agent.voice import CONVERSATIONAL_STYLE
+    lowered = CONVERSATIONAL_STYLE.lower()
+    assert "open with" in lowered          # acknowledge
+    assert "real values" in lowered        # answer
+    assert "next step" in lowered          # suggest
+    assert "no pleasantries" in lowered
+
+
+def test_brief_style_is_actually_brief():
+    """It rides on the orchestrator prompt, which is resent every iteration."""
+    from agent.voice import CONVERSATIONAL_STYLE, CONVERSATIONAL_STYLE_BRIEF
+    assert len(CONVERSATIONAL_STYLE_BRIEF) < len(CONVERSATIONAL_STYLE)
+    assert len(CONVERSATIONAL_STYLE_BRIEF) // 4 < 90, "too costly to resend per loop"
+
+
+def test_both_paths_apply_the_style():
+    import inspect
+    from agent.nodes import simple_path, complex_path
+    assert "CONVERSATIONAL_STYLE" in inspect.getsource(simple_path)
+    assert "system_for_tools" in inspect.getsource(simple_path)
+    complex_src = inspect.getsource(complex_path)
+    # The loop answers most complex questions, so the style must be in the system
+    # prompt, not only in the closing call the brief pointed at.
+    assert "RULE 4" in complex_src
+    assert "system_for_tools" in complex_src
+
+
 # --- clarifying questions ---------------------------------------------------
 def test_clarify_offers_real_host_groups_not_invented_ones():
     """Options must come from the live estate, or the app offers things that

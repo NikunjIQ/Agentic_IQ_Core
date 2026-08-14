@@ -8,6 +8,7 @@ from agent.metadata import fetch_live_metadata
 from agent.history import recent_turns
 from agent.arg_guard import scrub
 from agent import streaming, clarify
+from agent.voice import CONVERSATIONAL_STYLE, system_for_tools
 
 SYNTHESIS_MODEL = "llama-3.3-70b-versatile"
 # Argument extraction is a constrained task — the schema is forced via tool_choice,
@@ -106,7 +107,13 @@ def simple_path_node(state: AgentState) -> AgentState:
     streaming.status("Writing the answer…")
     client = ChatGroq(model=SYNTHESIS_MODEL, temperature=0)
     state["final_answer"] = streaming.stream_text(client,
-        [{"role": "system", "content": f"You are IQCore, an IT operations assistant. Current Date: {current_date}. Answer the user's question accurately using the tool result provided. Pay strict attention to dates (e.g. today vs yesterday vs historical years like 2025). Include actual values, counts, and names."}]
+        [{"role": "system", "content":
+            f"You are IQCore, an IT operations assistant. Current Date: {current_date}. "
+            f"Answer the user's question accurately using the tool result provided. "
+            f"Pay strict attention to dates (e.g. today vs yesterday vs historical years "
+            f"like 2025). Include actual values, counts, and names.\n\n"
+            f"The system you queried for this answer: {system_for_tools(tool_name)}.\n"
+            f"{CONVERSATIONAL_STYLE}"}]
         + recent_turns(state.get("conversation_history"))
         + [{"role": "user", "content": f"Question: {state['question']}\n\nTool args used: {json.dumps(tool_args)}\n\nTool result: {result['summary']}{df_context}"}]
     )
