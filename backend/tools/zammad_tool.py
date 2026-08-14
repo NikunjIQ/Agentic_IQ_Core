@@ -105,9 +105,11 @@ def query_zammad(
       that exact state only.
       Pass the wider set 'open,new,Work in Progress,Escalated' ONLY when the user asks
       generically for active/unresolved/outstanding tickets without naming a state.
-    - date_filter: Relative window, e.g. 'today', 'yesterday', 'this week', 'this month',
-      'last 10 days'. OMIT THIS unless the user actually mentions a time period — adding
-      a window they did not ask for silently answers a narrower question.
+    - date_filter: ONLY set this when the user names a time period. If the question does
+      not mention one, leave this out entirely — a window nobody asked for silently
+      answers a narrower question than the one posed.
+      When a period IS named, accepted forms are: a day ('today', 'yesterday'), a calendar
+      period ('this week', 'this month'), a rolling window of N days, or an exact date.
     - date_field: Which timestamp date_filter applies to — 'created' (default), 'updated',
       or 'closed'. Use 'closed' for "how many tickets were closed/resolved in last N days".
     - owner_filter: Assigned agent, by name or email. Use for "handled by <person>".

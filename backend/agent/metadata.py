@@ -6,7 +6,10 @@ from requests.auth import HTTPBasicAuth
 # Cache dictionary to store metadata and prevent spamming APIs
 _METADATA_CACHE = {
     "data": None,
-    "last_fetched": 0
+    "last_fetched": 0,
+    # The same fetch, kept as values rather than prose. Clarifying questions must
+    # offer real host groups and states, so they need the list, not the sentence.
+    "options": {},
 }
 
 CACHE_TTL_SECONDS = 300  # Cache metadata for 5 minutes
@@ -23,7 +26,14 @@ def fetch_live_metadata() -> str:
     if _METADATA_CACHE["data"] and (current_time - _METADATA_CACHE["last_fetched"]) < CACHE_TTL_SECONDS:
         return _METADATA_CACHE["data"]
         
+    try:
+        from agent.config_store import ensure_applied
+        ensure_applied()
+    except Exception:
+        pass
+
     metadata_lines = ["LIVE SYSTEM SCHEMA:"]
+    options = {}
     
     # 1. Fetch Zabbix Hostgroups
     try:
@@ -42,6 +52,7 @@ def fetch_live_metadata() -> str:
                 groups = [g.get('name') for g in res.json().get('result', []) if g.get('name')]
                 if groups:
                     metadata_lines.append(f"- ZABBIX_HOST_GROUPS: {groups}")
+                    options["zabbix_groups"] = groups
     except Exception as e:
         metadata_lines.append(f"- ZABBIX_HOST_GROUPS: (Failed to fetch: {str(e)})")
 
@@ -65,6 +76,7 @@ def fetch_live_metadata() -> str:
                 states = [s.get('name') for s in res.json() if s.get('name')]
                 if states:
                     metadata_lines.append(f"- ZAMMAD_TICKET_STATES: {states}")
+                    options["zammad_states"] = states
     except Exception as e:
         metadata_lines.append(f"- ZAMMAD_TICKET_STATES: (Failed to fetch: {str(e)})")
 
@@ -75,6 +87,7 @@ def fetch_live_metadata() -> str:
         nodes = sorted(prom.node_map())
         if nodes:
             metadata_lines.append(f"- PROMETHEUS_NODES: {nodes}")
+            options["prometheus_nodes"] = nodes
         jobs = sorted({t.get("labels", {}).get("job") for t in prom.targets()
                        if t.get("labels", {}).get("job")})
         if jobs:
@@ -86,9 +99,21 @@ def fetch_live_metadata() -> str:
     
     # Update Cache
     _METADATA_CACHE["data"] = final_schema
+    _METADATA_CACHE["options"] = options
     _METADATA_CACHE["last_fetched"] = current_time
-    
+
     return final_schema
+
+
+def live_options() -> dict:
+    """Real values from the connected systems, for building clarifying questions.
+
+    Shares the 5-minute cache with fetch_live_metadata, so asking the user a
+    question costs no extra API calls.
+    """
+    if not _METADATA_CACHE["options"]:
+        fetch_live_metadata()
+    return dict(_METADATA_CACHE["options"])
 
 if __name__ == "__main__":
     from dotenv import load_dotenv

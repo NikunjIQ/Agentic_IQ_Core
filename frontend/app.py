@@ -1,3 +1,5 @@
+import json
+
 import requests
 import pandas as pd
 import streamlit as st
@@ -17,6 +19,34 @@ def backend(method: str, path: str, **kwargs):
     response = call(f"{BACKEND_URL}{path}", timeout=kwargs.pop("timeout", 90), **kwargs)
     response.raise_for_status()
     return response.json()
+
+
+def stream_answer(question: str, history: list, result_holder: dict, status_holder):
+    """Yield answer text as it arrives, collecting the full payload on the side.
+
+    st.write_stream only returns the concatenated text, so the tables and debug
+    data are captured into result_holder rather than returned.
+    """
+    with requests.post(f"{BACKEND_URL}/chat/stream",
+                       json={"question": question, "conversation_history": history},
+                       stream=True, timeout=300) as response:
+        response.raise_for_status()
+        for raw in response.iter_lines(decode_unicode=True):
+            if not raw or not raw.startswith("data: "):
+                continue
+            event = json.loads(raw[6:])
+            kind = event.get("type")
+            if kind == "token":
+                yield event.get("text", "")
+            elif kind == "status":
+                # Progress is where the seconds actually go — tools, not tokens.
+                status_holder.caption(f"⏳ {event.get('message', '')}")
+            elif kind == "done":
+                status_holder.empty()
+                result_holder.update(event.get("payload") or {})
+            elif kind == "error":
+                status_holder.empty()
+                yield f"\n\n{event.get('message', 'Something went wrong.')}"
 
 
 def render_results(results: dict):
@@ -110,32 +140,34 @@ if user_input := st.chat_input("Ask about tickets, infrastructure, VMs or logs..
         st.markdown(user_input)
 
     with st.chat_message("assistant"):
-        with st.spinner("Thinking..."):
-            try:
-                result = backend("post", "/chat", timeout=180, json={
-                    "question": user_input,
-                    "conversation_history": st.session_state.conversation_history,
-                })
+        status_holder = st.empty()
+        result = {}
+        try:
+            answer = st.write_stream(stream_answer(
+                user_input, st.session_state.conversation_history, result, status_holder))
+            status_holder.empty()
 
-                st.markdown(result["final_answer"])
-                if result.get("cached"):
-                    st.caption(f"↺ cached answer ({result.get('cache_age_seconds', 0)}s old)")
+            if result.get("cached"):
+                st.caption(f"↺ cached answer ({result.get('cache_age_seconds', 0)}s old)")
 
-                for frame in result.get("dataframes", []):
-                    if frame:
-                        st.dataframe(pd.DataFrame(frame), use_container_width=True)
+            for frame in result.get("dataframes", []):
+                if frame:
+                    st.dataframe(pd.DataFrame(frame), use_container_width=True)
 
-                with st.expander("Debug: agent reasoning"):
-                    st.write(f"Path taken: {result.get('complexity', 'unknown')}")
-                    st.write(f"Tools called: {result.get('tools_called', [])}")
-                    for entry in result.get("tool_results_raw", []):
-                        st.write(f"**{entry.get('tool', 'unknown')}** "
-                                 f"called with: `{entry.get('args', {})}`")
-                        st.json(entry.get("result", {}))
+            with st.expander("Debug: agent reasoning"):
+                st.write(f"Path taken: {result.get('complexity', 'unknown')}")
+                st.write(f"Tools called: {result.get('tools_called', [])}")
+                for note in result.get("guard_notes", []):
+                    st.warning(f"Argument guard: {note}", icon="🛡️")
+                for entry in result.get("tool_results_raw", []):
+                    st.write(f"**{entry.get('tool', 'unknown')}** "
+                             f"called with: `{entry.get('args', {})}`")
+                    st.json(entry.get("result", {}))
 
-                st.session_state.conversation_history += [
-                    {"role": "user", "content": user_input},
-                    {"role": "assistant", "content": result["final_answer"]},
-                ]
-            except Exception as exc:
-                st.error(f"Error communicating with backend: {exc}")
+            st.session_state.conversation_history += [
+                {"role": "user", "content": user_input},
+                {"role": "assistant", "content": answer or result.get("final_answer", "")},
+            ]
+        except Exception as exc:
+            status_holder.empty()
+            st.error(f"Error communicating with backend: {exc}")

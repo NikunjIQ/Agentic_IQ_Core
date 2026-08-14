@@ -20,5 +20,15 @@ try:
 except Exception:
     pass
 
+# Credentials entered through the UI live in credentials.json, not .env, and
+# main.py is what normally applies them. The tests never import main, so without
+# this the whole suite runs against an unconfigured environment the moment
+# someone configures the app through the sidebar.
+try:
+    from agent import config_store
+    config_store.apply_to_environment()
+except Exception:
+    pass
+
 # Tracing adds latency and noise to every test run.
 os.environ["LANGCHAIN_TRACING_V2"] = "false"

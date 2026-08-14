@@ -4,6 +4,8 @@ from agent.state import AgentState
 from agent.tool_registry import TOOL_REGISTRY
 from agent.tool_schemas import TOOL_SCHEMAS
 from agent.metadata import fetch_live_metadata
+from agent.arg_guard import scrub
+from agent import streaming, clarify
 
 REASONING_MODEL = "llama-3.3-70b-versatile"
 MAX_TOOL_CALLS = 10
@@ -92,10 +94,12 @@ def complex_path_node(state: AgentState) -> AgentState:
     final_answer = None
 
     malformed_calls = 0
+    guard_notes = []
 
     while tool_call_count < MAX_TOOL_CALLS:
         try:
-            response = client.bind_tools(TOOL_SCHEMAS).invoke(messages)
+            response = streaming.stream_with_tools(
+                client.bind_tools(TOOL_SCHEMAS), messages)
         except Exception as exc:
             # The model sometimes emits a tool call Groq cannot parse. That is a
             # bad generation, not a bad question — retry once, and if it happens
@@ -121,10 +125,16 @@ def complex_path_node(state: AgentState) -> AgentState:
         messages.append(response)
         for tool_call in response.tool_calls:
             tool_name = tool_call["name"]
-            tool_args = tool_call["args"]
+            # Same guard as the simple path: a time window the question never
+            # mentioned narrows the answer without anyone noticing.
+            tool_args, dropped = scrub(tool_call["args"], state["question"],
+                                       state.get("conversation_history"))
+            if dropped:
+                guard_notes.extend(f"{tool_name}: removed unrequested {d}" for d in dropped)
             tools_called.append(tool_name)
             tool_call_count += 1
 
+            streaming.status(f"Querying {tool_name.replace('query_', '').replace('_', ' ').title()}…")
             tool_entry = TOOL_REGISTRY.get(tool_name)
             call_key = (tool_name, json.dumps(tool_args, sort_keys=True, default=str))
 
@@ -168,10 +178,11 @@ def complex_path_node(state: AgentState) -> AgentState:
     if final_answer is None:
         if malformed_calls > 1 and not tool_results_raw:
             # Nothing was gathered and the model cannot produce a valid call.
-            state["final_answer"] = (
-                "I could not turn that into a valid query. Please rephrase it with the "
-                "system and time period stated explicitly — for example 'show me "
-                "OpenStack error logs for yesterday'.")
+            # Ask which system was meant instead of asking the user to rephrase.
+            state["final_answer"] = clarify.build("system", state["question"])
+            emitter = streaming.get_emitter()
+            if emitter is not None:
+                emitter.token(state["final_answer"])
             state["tools_called"] = tools_called
             state["tool_results_raw"] = tool_results_raw
             state["dataframes"] = dataframes
@@ -180,11 +191,13 @@ def complex_path_node(state: AgentState) -> AgentState:
                    if malformed_calls else
                    "You've reached the maximum tool calls. Summarize what you found so far.")
         messages.append({"role": "user", "content": closing})
-        response = client.invoke(messages)
-        final_answer = response.content
+        streaming.status("Writing the answer…")
+        final_answer = streaming.stream_text(client, messages)
 
     state["final_answer"] = final_answer
     state["tools_called"] = tools_called
     state["tool_results_raw"] = tool_results_raw
     state["dataframes"] = dataframes
+    if guard_notes:
+        state["guard_notes"] = guard_notes
     return state

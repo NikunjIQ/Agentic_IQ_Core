@@ -6,6 +6,8 @@ from agent.tool_registry import TOOL_REGISTRY
 from agent.tool_schemas import TOOL_SCHEMAS
 from agent.metadata import fetch_live_metadata
 from agent.history import recent_turns
+from agent.arg_guard import scrub
+from agent import streaming, clarify
 
 SYNTHESIS_MODEL = "llama-3.3-70b-versatile"
 # Argument extraction is a constrained task — the schema is forced via tool_choice,
@@ -18,7 +20,14 @@ def simple_path_node(state: AgentState) -> AgentState:
     tool_entry = TOOL_REGISTRY.get(tool_name)
 
     if tool_entry is None:
-        state["final_answer"] = "I wasn't able to determine which system to check for this question. Could you rephrase it?"
+        # No tool was chosen at all — the clearest possible case for asking which
+        # system was meant rather than sending the user away to rephrase.
+        state["final_answer"] = clarify.build("system", state["question"])
+        emitter = streaming.get_emitter()
+        if emitter is not None:
+            emitter.token(state["final_answer"])
+        state["tool_results_raw"] = [{"tool": "clarify", "args": {"axis": "system"},
+                                      "result": {"summary": "no tool matched the question"}}]
         return state
 
     # Extract dynamic arguments using the fast model
@@ -52,20 +61,27 @@ def simple_path_node(state: AgentState) -> AgentState:
                     raise      # rate limits and outages should surface, not retry
                 continue
 
+        # The model fills blanks it should leave empty. Remove any time window the
+        # question did not actually ask for, before it silently narrows the answer.
+        tool_args, dropped = scrub(tool_args, state["question"],
+                                   state.get("conversation_history"))
+        if dropped:
+            state["guard_notes"] = [f"removed unrequested {d}" for d in dropped]
+
         if not extracted:
             # Falling through to the tool's defaults would silently answer a
-            # different question — "what about yesterday?" would return today's
-            # data and look correct. Better to say the query could not be built.
-            state["final_answer"] = (
-                "I could not turn that into a valid query for "
-                f"{tool_name.replace('query_', '').title()}. Please rephrase it, "
-                "stating the system and time period explicitly — for example "
-                "'show me OpenStack error logs for yesterday'.")
+            # different question. Ask which system was meant rather than telling
+            # the user to rephrase — they already said what they wanted.
+            state["final_answer"] = clarify.build("system", state["question"])
+            emitter = streaming.get_emitter()
+            if emitter is not None:
+                emitter.token(state["final_answer"])
             state["tools_called"] = []
             state["tool_results_raw"] = [{"tool": tool_name, "args": None,
                                           "result": {"error": "argument extraction failed"}}]
             return state
 
+    streaming.status(f"Querying {tool_name.replace('query_', '').title()}…")
     try:
         result = tool_entry["function"].invoke(tool_args)
     except Exception as e:
@@ -87,13 +103,13 @@ def simple_path_node(state: AgentState) -> AgentState:
     if result.get("dataframe") is not None and not result["dataframe"].empty:
         df_context = f"\n\nData Table (First 10 rows):\n{result['dataframe'].head(10).to_string()}"
         
+    streaming.status("Writing the answer…")
     client = ChatGroq(model=SYNTHESIS_MODEL, temperature=0)
-    response = client.invoke(
+    state["final_answer"] = streaming.stream_text(client,
         [{"role": "system", "content": f"You are IQCore, an IT operations assistant. Current Date: {current_date}. Answer the user's question accurately using the tool result provided. Pay strict attention to dates (e.g. today vs yesterday vs historical years like 2025). Include actual values, counts, and names."}]
         + recent_turns(state.get("conversation_history"))
         + [{"role": "user", "content": f"Question: {state['question']}\n\nTool args used: {json.dumps(tool_args)}\n\nTool result: {result['summary']}{df_context}"}]
     )
-    state["final_answer"] = response.content
     return state
 
 

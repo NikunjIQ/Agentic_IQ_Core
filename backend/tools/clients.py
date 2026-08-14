@@ -14,6 +14,19 @@ from typing import Optional
 import requests
 from requests.auth import HTTPBasicAuth
 
+
+def _ensure_config():
+    """Merge credentials saved through the UI before reading the environment.
+
+    Clients are built per call and read os.getenv at that moment, so doing this
+    here covers every entry point rather than only the FastAPI app.
+    """
+    try:
+        from agent.config_store import ensure_applied
+        ensure_applied()
+    except Exception:
+        pass
+
 # Zabbix severity codes -> labels (matches the Zabbix UI)
 SEVERITY_LABELS = {
     0: "Not classified",
@@ -53,6 +66,7 @@ def _ticket_cache_put(tickets):
 # ---------------------------------------------------------------------------
 class ZabbixClient:
     def __init__(self):
+        _ensure_config()
         url = os.getenv("ZABBIX_URL", "http://192.168.1.205:8080").rstrip("/")
         if not url.endswith("api_jsonrpc.php"):
             url += "/api_jsonrpc.php"
@@ -143,6 +157,7 @@ PROM_NODE_CACHE_TTL = 300
 
 class PrometheusClient:
     def __init__(self):
+        _ensure_config()
         self.url = os.getenv("PROMETHEUS_URL", "http://192.168.1.29:9190").rstrip("/")
         user = os.getenv("PROMETHEUS_USER", "")
         password = os.getenv("PROMETHEUS_PASS", "")
@@ -234,6 +249,7 @@ def canonical_level(raw: str) -> str:
 
 class OpenSearchClient:
     def __init__(self):
+        _ensure_config()
         self.url = os.getenv("OPENSEARCH_URL", "http://192.168.1.32:9200").rstrip("/")
         self.index = os.getenv("OPENSEARCH_INDEX", "flog-*")
         user = os.getenv("OPENSEARCH_USER", "")
@@ -269,6 +285,7 @@ class OpenSearchClient:
 # ---------------------------------------------------------------------------
 class ZammadClient:
     def __init__(self):
+        _ensure_config()
         self.url = os.getenv("ZAMMAD_URL", "http://192.168.1.205:8082").rstrip("/")
         self.headers = {}
         self.auth = None

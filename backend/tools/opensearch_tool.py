@@ -133,9 +133,10 @@ def query_opensearch(
 
     - search: Full text to find in log messages, e.g. 'no port found',
       'authentication failed', 'timeout'. Supports quoted phrases, AND/OR, and -negation.
-    - date_filter: Time window. 'today' (default), 'yesterday', 'last 2 hours',
-      'last 7 days', 'this week', 'this month', or an exact date like '2026-08-12'.
-      Logs are retained about 60 days.
+    - date_filter: Time window, defaulting to today when omitted. Set it only when the
+      user names a period. Accepted forms: a day ('today', 'yesterday'), a rolling window
+      of N minutes/hours/days, a calendar period ('this week', 'this month'), or an exact
+      date. Logs are retained about 60 days.
     - log_level: 'error', 'warning', 'info', 'debug', 'critical'. Comma separated for
       several. Case variants in the data are handled automatically. If omitted, DEBUG
       is excluded because it is over half of all log volume.

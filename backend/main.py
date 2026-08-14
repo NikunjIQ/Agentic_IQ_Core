@@ -1,17 +1,18 @@
 import os
 import re
 import json
+import threading
 from typing import Any
 from datetime import datetime
 from fastapi import FastAPI
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from dotenv import load_dotenv
 import pandas as pd
 import numpy as np
 
 from agent.graph import COMPILED_GRAPH
-from agent import answer_cache, config_store, config_test
+from agent import answer_cache, config_store, config_test, streaming
 
 load_dotenv()
 
@@ -106,46 +107,100 @@ async def chat(request: ChatRequest):
             "complexity": "error",
         })
 
+    serialised = _serialise_state(result_state)
+    # Cache only what actually serialised — anything stored is replayed verbatim,
+    # so it has to be known-good JSON.
+    answer_cache.put(request.question, serialised, request.conversation_history)
+    return JSONResponse(content=serialised)
+
+
+def _serialise_state(result_state: dict) -> dict:
+    """Graph state -> JSON the frontend can render. Shared by both endpoints."""
     serialized_dfs = []
     for df in result_state.get("dataframes", []):
         if isinstance(df, pd.DataFrame):
             cleaned_df = df.where(pd.notnull(df), None)
             serialized_dfs.append(cleaned_df.to_dict(orient="records"))
-        elif isinstance(df, dict):
-            serialized_dfs.append(df)
-        elif isinstance(df, list):
+        elif isinstance(df, (dict, list)):
             serialized_dfs.append(df)
 
     payload = {
-        "final_answer": result_state["final_answer"] or "",
+        "final_answer": result_state.get("final_answer") or "",
         "dataframes": serialized_dfs,
-        "tools_called": result_state["tools_called"] or [],
-        "tool_results_raw": result_state["tool_results_raw"] or [],
-        "complexity": result_state["complexity"] or "unknown",
+        "tools_called": result_state.get("tools_called") or [],
+        "tool_results_raw": result_state.get("tool_results_raw") or [],
+        "complexity": result_state.get("complexity") or "unknown",
+        "guard_notes": result_state.get("guard_notes") or [],
     }
 
     try:
-        clean_payload = safe_serialize(payload)
-        json_str = json.dumps(clean_payload, default=str)
-        serialised = json.loads(json_str)
-        # Cache only what actually serialised — anything stored here is replayed
-        # verbatim, so it has to be known-good JSON.
-        answer_cache.put(request.question, serialised, request.conversation_history)
-        return JSONResponse(content=serialised)
+        return json.loads(json.dumps(safe_serialize(payload), default=str))
     except Exception as exc:
         # The answer is already computed; never lose it to a serialisation problem
         # in the debug payload.
-        return JSONResponse(content={
+        return {
             "final_answer": payload["final_answer"],
             "dataframes": [],
             "tools_called": payload["tools_called"],
             "tool_results_raw": [{"error": f"Could not serialise debug data: {exc}"}],
             "complexity": payload["complexity"],
-        })
+            "guard_notes": payload["guard_notes"],
+        }
 
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.post("/chat/stream")
+async def chat_stream(request: ChatRequest):
+    """Same answer as /chat, delivered as it is produced.
+
+    The graph is synchronous, so it runs in a worker thread and publishes events
+    to a queue that this endpoint drains. That keeps one implementation of the
+    orchestration rather than a streaming copy that would drift from it.
+    """
+    cached = answer_cache.get(request.question, request.conversation_history)
+
+    def events():
+        if cached is not None:
+            yield _sse({"type": "token", "text": cached.get("final_answer", "")})
+            yield _sse({"type": "done", "payload": cached})
+            return
+
+        emitter = streaming.Emitter()
+
+        def run():
+            streaming.set_emitter(emitter)          # inside the thread it will run in
+            try:
+                state = COMPILED_GRAPH.invoke({
+                    "question": request.question,
+                    "conversation_history": request.conversation_history,
+                    "complexity": None, "simple_tool_choice": None,
+                    "tool_results_raw": [], "dataframes": [],
+                    "tools_called": [], "final_answer": None,
+                })
+                payload = _serialise_state(state)
+                answer_cache.put(request.question, payload, request.conversation_history)
+                emitter.finish(payload)
+            except Exception as exc:
+                emitter.fail(_explain_failure(exc))
+
+        threading.Thread(target=run, daemon=True).start()
+
+        while True:
+            event = emitter.events.get()
+            if event is streaming.DONE:
+                break
+            yield _sse(event)
+
+    return StreamingResponse(events(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache",
+                                      "X-Accel-Buffering": "no"})
+
+
+def _sse(event: dict) -> str:
+    return f"data: {json.dumps(event, default=str)}\n\n"
 
 
 class ConfigRequest(BaseModel):

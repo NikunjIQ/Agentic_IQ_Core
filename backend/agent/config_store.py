@@ -81,6 +81,27 @@ def apply_to_environment(config: dict = None) -> int:
     return applied
 
 
+_applied_once = False
+
+
+def ensure_applied() -> None:
+    """Apply saved credentials once per process, whatever the entry point.
+
+    Credentials live in two places — .env and this file — and only main.py used
+    to merge them. Anything else (the eval harness, a one-off script) silently
+    ran unconfigured, which looks like a broken system rather than a missing
+    call. Every client and the metadata fetch call this, so the merge happens
+    wherever the process started.
+    """
+    global _applied_once
+    if not _applied_once:
+        _applied_once = True
+        try:
+            apply_to_environment()
+        except Exception:
+            pass
+
+
 def reset_caches() -> list:
     """Drop every cached lookup after the credentials change.
 

@@ -73,7 +73,15 @@ def test_routing_hints_survive_in_the_docstrings():
     zabbix = TOOL_REGISTRY["query_zabbix"]["description"]
     assert "problems" in zabbix and "alerts" in zabbix
     zammad = TOOL_REGISTRY["query_zammad"]["description"]
-    assert "OMIT THIS" in zammad, "date_filter guard missing; 8B invents time windows"
+    assert "ONLY set this when the user names a time period" in zammad, \
+        "date_filter guard missing; the 8B invents time windows without it"
+    # The trigger was a concrete value sitting in the date_filter PARAMETER
+    # description — the model reached for it when the question named no period.
+    # Elsewhere in the docstring the phrase is fine: it describes what the summary
+    # reports, which is how a genuine 10-day question gets answered without a filter.
+    date_section = zammad.split("- date_filter:")[1].split("\n    - ")[0]
+    assert "last 10 days" not in date_section, \
+        "a concrete date example is back in the date_filter description; it primes the guess"
     assert "exact state only" in zammad, "named-state guard missing; 'Open State' over-expands"
     prom = TOOL_REGISTRY["query_prometheus"]["description"]
     assert "NOT physical" in prom or "NOT the physical" in prom or "virtual routers" in prom.lower()
@@ -191,6 +199,222 @@ def test_cache_evicts_rather_than_growing_forever():
         answer_cache.put(f"question {i}", {"final_answer": str(i),
                                            "complexity": "simple"}, [])
     assert answer_cache.stats()["entries"] <= answer_cache.MAX_ENTRIES
+
+
+# --- clarifying questions ---------------------------------------------------
+def test_clarify_offers_real_host_groups_not_invented_ones():
+    """Options must come from the live estate, or the app offers things that
+    do not exist and the user picks one that cannot be queried."""
+    from agent import clarify
+    from agent.metadata import live_options
+    groups = live_options().get("zabbix_groups") or []
+    if not groups:
+        return          # unconfigured environment; covered by the live suite
+    question = clarify.build("scope")
+    assert any(group in question for group in groups), \
+        f"no real host group appears in: {question!r}"
+
+
+def test_clarify_always_offers_an_escape():
+    from agent import clarify
+    for axis in ("system", "scope", "timeframe"):
+        assert clarify.ESCAPE_OPTION in clarify.build(axis)
+
+
+def test_clarify_asks_about_the_right_axis():
+    from agent import clarify
+    assert "time period" in clarify.build("timeframe").lower()
+    system = clarify.build("system").lower()
+    assert "zabbix" in system and "prometheus" in system
+
+
+def test_clarify_never_asks_twice_in_a_row():
+    """Asking again after the user has answered traps them in a loop."""
+    from agent import clarify
+    asked = [{"role": "user", "content": "show me what's down"},
+             {"role": "assistant", "content": clarify.build("system")}]
+    assert clarify.was_just_asked(asked) is True
+    normal = [{"role": "user", "content": "how many hosts are down"},
+              {"role": "assistant", "content": "There are 3 hosts down."}]
+    assert clarify.was_just_asked(normal) is False
+    assert clarify.was_just_asked([]) is False
+
+
+def test_clarify_axis_is_validated():
+    from agent import clarify
+    assert clarify.normalise_axis("system") == "system"
+    assert clarify.normalise_axis("SCOPE") == "scope"
+    for junk in ("everything", "", None, "null", 42):
+        assert clarify.normalise_axis(junk) == "", f"{junk!r} should not trigger a question"
+
+
+def test_clarify_costs_no_model_call():
+    import inspect
+    from agent.nodes import clarify_node
+    source = inspect.getsource(clarify_node)
+    assert "ChatGroq" not in source and "invoke" not in source, \
+        "the clarify node must not call a model — it is meant to be free"
+
+
+def test_no_rephrase_dead_ends_remain():
+    """Every 'please rephrase' has been replaced with a real question."""
+    import inspect
+    from agent.nodes import simple_path, complex_path
+    for module in (simple_path, complex_path):
+        source = inspect.getsource(module)
+        assert "rephrase it" not in source.lower(), \
+            f"{module.__name__} still dead-ends instead of asking"
+        assert "clarify.build" in source
+
+
+def test_graph_routes_vague_questions_to_clarify():
+    from agent.graph import route_by_complexity
+    assert route_by_complexity({"clarify_axis": "system", "complexity": "simple"}) == "clarify"
+    assert route_by_complexity({"clarify_axis": "", "complexity": "simple"}) == "simple_path"
+    assert route_by_complexity({"clarify_axis": None, "complexity": "complex"}) == "complex_path"
+
+
+# --- streaming (no network, no tokens: a fake client stands in) -------------
+class _FakeClient:
+    def __init__(self, pieces=("Hello ", "world")):
+        self.pieces = pieces
+
+    def invoke(self, messages):
+        return type("R", (), {"content": "".join(self.pieces)})()
+
+    def stream(self, messages):
+        for piece in self.pieces:
+            yield type("C", (), {"content": piece})()
+
+
+def test_streaming_is_off_by_default():
+    """/chat must keep working exactly as before — one call, no emitter."""
+    from agent import streaming
+    streaming.set_emitter(None)
+    assert streaming.stream_text(_FakeClient(), []) == "Hello world"
+    assert streaming.get_emitter() is None
+
+
+def test_streaming_emits_tokens_and_still_returns_the_whole_answer():
+    from agent import streaming
+    emitter = streaming.Emitter()
+    streaming.set_emitter(emitter)
+    try:
+        text = streaming.stream_text(_FakeClient(("The ", "answer ", "is 3.")), [])
+        assert text == "The answer is 3.", "streaming must not lose the assembled text"
+        tokens = []
+        while not emitter.events.empty():
+            event = emitter.events.get()
+            if isinstance(event, dict) and event["type"] == "token":
+                tokens.append(event["text"])
+        assert "".join(tokens) == text, "tokens sent must match the text returned"
+    finally:
+        streaming.set_emitter(None)
+
+
+def test_status_updates_are_silent_when_not_streaming():
+    """A status call outside a streamed request must not raise."""
+    from agent import streaming
+    streaming.set_emitter(None)
+    streaming.status("Querying Zabbix…")
+
+
+def test_streaming_finish_and_fail_terminate_the_queue():
+    from agent import streaming
+    emitter = streaming.Emitter()
+    emitter.finish({"final_answer": "done"})
+    assert emitter.events.get()["type"] == "done"
+    assert emitter.events.get() is streaming.DONE
+
+    emitter = streaming.Emitter()
+    emitter.fail("rate limited")
+    assert emitter.events.get()["type"] == "error"
+    assert emitter.events.get() is streaming.DONE
+
+
+def test_nodes_use_the_streaming_helpers():
+    import inspect
+    from agent.nodes import simple_path, complex_path
+    assert "streaming.stream_text" in inspect.getsource(simple_path)
+    complex_src = inspect.getsource(complex_path)
+    assert "streaming.stream_with_tools" in complex_src
+    assert "streaming.status" in complex_src
+
+
+# --- argument guard ---------------------------------------------------------
+def test_guard_removes_a_time_window_nobody_asked_for():
+    """The bug that shipped: 'How many tickets are in Open State?' came back with
+    date_filter='last 10 days', so 22 open tickets became 2."""
+    from agent.arg_guard import scrub
+    args, dropped = scrub(
+        {"state_filter": "open", "date_filter": "last 10 days", "date_field": "created"},
+        "How many tickets are in Open State?", [])
+    assert args == {"state_filter": "open"}
+    assert dropped and "date_filter" in dropped[0]
+
+
+def test_guard_keeps_a_time_window_the_user_asked_for():
+    from agent.arg_guard import scrub
+    for question in ("How many tickets were closed in the last 10 days?",
+                     "show me logs for today",
+                     "what happened yesterday?",
+                     "tickets created this month",
+                     "errors in the past 2 hours",
+                     "logs from 2026-08-11",
+                     "how many alerts since Monday"):
+        args, dropped = scrub({"date_filter": "x", "state_filter": "open"}, question, [])
+        assert not dropped, f"{question!r} names a period but the guard stripped it"
+        assert args.get("date_filter") == "x"
+
+
+def test_guard_accepts_a_period_named_earlier_in_the_conversation():
+    """After 'show me logs for yesterday', a bare 'and errors?' is still about yesterday."""
+    from agent.arg_guard import scrub
+    history = [{"role": "user", "content": "show me logs for yesterday"},
+               {"role": "assistant", "content": "There were 2.2 million entries."}]
+    args, dropped = scrub({"date_filter": "yesterday", "log_level": "error"},
+                          "and errors?", history)
+    assert not dropped and args["date_filter"] == "yesterday"
+
+
+def test_guard_does_not_treat_now_as_a_time_window():
+    """'currently' describes live state, not a window — it must not admit a date."""
+    from agent.arg_guard import scrub
+    for question in ("How many tickets are unassigned currently?",
+                     "what is down right now",
+                     "which VMs are running now"):
+        args, dropped = scrub({"date_filter": "last 10 days"}, question, [])
+        assert dropped, f"{question!r} wrongly admitted a date filter"
+        assert "date_filter" not in args
+
+
+def test_guard_leaves_untouched_arguments_alone():
+    from agent.arg_guard import scrub
+    original = {"state_filter": "open", "priority_filter": "2", "group_by": "agent"}
+    args, dropped = scrub(dict(original), "How many priority 2 tickets by agent?", [])
+    assert args == original and not dropped
+
+
+def test_guard_keeps_rate_window_for_metric_queries():
+    """range_window sizes a rate average; it does not restrict which rows count."""
+    from agent.arg_guard import scrub
+    args, _ = scrub({"metric": "cpu", "range_window": "5m"},
+                    "what is the cpu utilisation of server01", [])
+    assert args["range_window"] == "5m"
+
+
+def test_guard_handles_empty_and_malformed_input():
+    from agent.arg_guard import scrub
+    assert scrub({}, "anything", []) == ({}, [])
+    assert scrub(None, "anything", []) == (None, [])
+
+
+def test_nodes_actually_apply_the_guard():
+    import inspect
+    from agent.nodes import simple_path, complex_path
+    for module in (simple_path, complex_path):
+        assert "scrub(" in inspect.getsource(module), \
+            f"{module.__name__} does not validate the model's arguments"
 
 
 # --- credential store (offline; uses a throwaway path) ----------------------
