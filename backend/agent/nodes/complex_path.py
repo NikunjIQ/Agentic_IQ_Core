@@ -10,7 +10,17 @@ from agent.voice import (CONVERSATIONAL_STYLE, CONVERSATIONAL_STYLE_BRIEF,
                          system_for_tools)
 
 from agent.models import REASONING_MODEL
-MAX_TOOL_CALLS = 10
+# A ceiling against runaway loops, not a working budget — real questions resolve
+# in two or three calls. Every iteration resends the system prompt and all tool
+# schemas, so the old ceiling of 10 allowed ~47k tokens of overhead on a single
+# question against an 8,000 tokens-per-minute allowance.
+MAX_TOOL_CALLS = 5
+
+# How much of a tool summary is carried back into the loop. Summaries deliberately
+# carry the complete figures, which is right for the final answer but is resent on
+# every subsequent iteration. The orchestrator only needs enough to decide what to
+# do next; synthesis still receives the untruncated summary from tool_results_raw.
+LOOP_SUMMARY_CHARS = 1200
 PREVIEW_ROWS = 10
 
 ORCHESTRATOR_SYSTEM_PROMPT = """You are IQCore, an intelligent IT operations assistant.
@@ -175,10 +185,20 @@ def complex_path_node(state: AgentState) -> AgentState:
                     df_context += "\n\nIMPORTANT — state this in your answer: " + note
                     coverage_notes.append(note)
 
+            # Trimmed for the loop only. The row that says how many rows there
+            # are sits at the front of every summary, so truncation costs detail
+            # rather than the headline figure — and tool_results_raw still holds
+            # the full text for the answer.
+            loop_summary = result.get("summary", "No summary available")
+            if len(loop_summary) > LOOP_SUMMARY_CHARS:
+                loop_summary = (loop_summary[:LOOP_SUMMARY_CHARS]
+                                + f" […truncated for reasoning; {len(loop_summary)} "
+                                  f"chars total, full figures available]")
+
             messages.append({
                 "role": "tool",
                 "tool_call_id": tool_call["id"],
-                "content": result.get("summary", "No summary available") + df_context,
+                "content": loop_summary + df_context,
             })
 
     if final_answer is None:

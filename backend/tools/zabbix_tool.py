@@ -35,26 +35,33 @@ def query_zabbix(
     date_filter: Optional[str] = None
 ) -> dict:
     """
-    Query the Zabbix infrastructure monitoring system.
-    Use this tool to inspect active host alerts, network device problems, system triggers,
-    ICMP ping availability, disk space alerts, host counts, and host group status.
-    - query_type: The type of Zabbix object to query (e.g., 'hosts', 'hostgroups', 'items', 'problems', 'alerts', 'triggers', 'audit', 'sla'). Default is 'hosts'. IMPORTANT: Use 'hosts' if you want to find total routers, total switches, or count specific types of devices! Use 'hostgroups' ONLY if the user specifically asks about host groups (e.g. 'Which host group has the most down devices?').
-    - host_filter: Optional. Filters by partial name or hostname (e.g., 'web', 'db', '192.168.1.73'). Works for query_type='hosts', 'items', 'audit', 'sla' AND 'problems' — use it to ask what is wrong with one specific device.
-    - status_filter: Optional. For query_type='hosts', filters by availability. Accepts several at once, e.g. 'up', 'down', 'unreachable or unknown'. Note 'down' includes hosts that are unreachable (not responding). For query_type='problems', pass a minimum severity digit instead (0=Not classified, 1=Information, 2=Warning, 3=Average, 4=High, 5=Disaster).
-    - group_filter: Optional. Filters by host group name (e.g., 'Routers', 'Switches', 'Servers'). Applies to query_type='hosts' AND query_type='items' — use it with 'items' to read a metric across every device in a group. Counts of routers and switches are also included in the 'hosts' summary automatically.
-    - item_keyword: Optional. Metric(s) to read, with query_type='items'. Name EVERY metric asked for in one call — 'cpu & memory' returns both. Recognised: cpu, memory, traffic/network, disk, uptime, OS/IOS/software version, agent version, hardware model/serial, ping/latency/loss.
-    - date_filter: Optional. Filters by relative date (e.g., 'today'). Applies to query_type='alerts'.
+    Query Zabbix: Cisco routers/switches, Windows hosts, a few Linux boxes.
 
-    ROUTING NOTES:
-    - "how many alerts are active / what is wrong right now" -> use query_type='problems', NOT 'alerts'. Alerts are records of notifications that were sent; problems are live conditions.
-    - "how many alerts were sent today" -> query_type='alerts' with date_filter='today'.
-    - "what is the problem with <device>" -> query_type='problems' with host_filter=<device>.
-    - "when was the config of <device> changed" -> query_type='audit' with host_filter=<device>.
-    - "what IOS / software version / uptime / model / serial does <device> run" -> query_type='items' with host_filter=<device> and the matching item_keyword.
-    - "what is the uptime of the routers / switches / all devices" -> query_type='items' with group_filter='Routers' (or 'Switches') and item_keyword='uptime'. A metric question about a CLASS of devices is still query_type='items' — use group_filter, NOT query_type='hosts'. query_type='hosts' reports up/down status and counts, and cannot report a metric value like uptime, CPU or version.
-    - "how many devices run Zabbix Agent 2 / which agent versions are deployed" -> query_type='hosts'. The estate-wide agent version breakdown is in the hosts summary. Agent 1 vs Agent 2 cannot be distinguished — say so; do not infer it from the version number. For one device use query_type='items' with item_keyword='agent version'.
-    - "what is the SLA / service level / uptime target for <device or the estate>" -> query_type='sla', optionally with host_filter. Returns each SLA's target, the achieved SLI per service, downtime, and which services no SLA covers at all. Do NOT use query_type='items' with item_keyword='uptime' for this — that is raw device uptime, not a service level.
-    - "what is the EOL/EOS of <device>" -> query_type='items' with item_keyword='eol'. Zabbix holds no lifecycle data; the tool says so and returns the model and serial an external lookup needs.
+    - query_type: 'hosts' (default) | 'hostgroups' | 'items' | 'problems' | 'alerts' | 'triggers' | 'audit' | 'sla'.
+      'hosts' = counts and up/down status, including totals for routers and switches.
+      'hostgroups' = only when the question is about the groups themselves.
+      'items' = metric VALUES. 'problems' = what is wrong now. 'alerts' = notifications
+      that were sent. 'audit' = config changes. 'sla' = service-level targets and achieved figures.
+    - host_filter: one device by name or IP. Applies to hosts, items, problems, audit, sla.
+    - group_filter: a host group ('Routers', 'Switches'). Applies to hosts and items.
+    - status_filter: for 'hosts', availability — accepts several at once ('up',
+      'unreachable or unknown'); 'down' includes unreachable. For 'problems', a minimum
+      severity digit 0-5.
+    - item_keyword: with 'items', the metric(s). Name EVERY metric asked for in one call.
+      Recognised: cpu, memory, traffic, disk, uptime, OS/IOS/software version, agent
+      version, hardware model/serial, ping/latency/loss, eol.
+    - date_filter: with 'alerts', a relative date such as 'today'.
+
+    ROUTING RULES:
+    - "what is wrong / how many alerts are active" -> 'problems', never 'alerts'.
+      Alerts are notification records; problems are live conditions.
+    - A metric for a CLASS of devices is still 'items' — use group_filter, never 'hosts'.
+      'hosts' reports status and counts and cannot report a metric value.
+    - Service level or SLA -> 'sla', not item_keyword='uptime'. Device uptime and a
+      service level are different figures.
+    - Agent 1 vs Agent 2 cannot be distinguished; report versions and say so.
+    - Zabbix holds no EOL/EOS data; item_keyword='eol' returns that statement plus the
+      model and serial an external lookup needs.
     """
     result = {"summary": "", "dataframe": pd.DataFrame(), "raw": {}}
 

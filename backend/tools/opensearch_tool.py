@@ -117,35 +117,27 @@ def query_opensearch(
     limit: Optional[int] = None,
 ) -> dict:
     """
-    Search the OpenStack application logs (OpenSearch / flog-* indices, shipped by
-    fluentd from the Kolla OpenStack deployment).
+    Search the OpenStack application logs (OpenSearch, flog-* indices, shipped by
+    fluentd from Kolla). Use for what OpenStack SERVICES are doing or failing —
+    nova, neutron, keystone, glance, cinder, placement, heat, rabbit, haproxy —
+    plus free-text log search and error investigation.
 
-    Use for questions about what OpenStack SERVICES are doing or failing: nova,
-    neutron, keystone, glance, cinder, placement, heat, rabbit, haproxy. Also for
-    free-text log searches ("show me logs mentioning X") and error investigation.
+    SCOPE: OpenStack service logs from server01/02/03 ONLY. NOTHING about network
+    devices — no Cisco routers or switches, no interface up/down, no SNMP. A
+    question about a router, switch or "network device down" goes to query_zabbix,
+    NOT here. Zero hits here means "not logged here", NOT "nothing is wrong".
 
-    IMPORTANT SCOPE: these are OpenStack service logs from server01/02/03 ONLY.
-    They contain NOTHING about network devices — no Cisco routers or switches, no
-    interface up/down events, no SNMP. A question about a router, switch, or
-    "network device down" must go to query_zabbix instead, NOT here. Searching here
-    for a Cisco device returns zero hits, which means "not logged here", NOT
-    "nothing is wrong".
-
-    - search: Full text to find in log messages, e.g. 'no port found',
-      'authentication failed', 'timeout'. Supports quoted phrases, AND/OR, and -negation.
-    - date_filter: Time window, defaulting to today when omitted. Set it only when the
-      user names a period. Accepted forms: a day ('today', 'yesterday'), a rolling window
-      of N minutes/hours/days, a calendar period ('this week', 'this month'), or an exact
-      date. Logs are retained about 60 days.
-    - log_level: 'error', 'warning', 'info', 'debug', 'critical'. Comma separated for
-      several. Case variants in the data are handled automatically. If omitted, DEBUG
-      is excluded because it is over half of all log volume.
-    - service: Which OpenStack service, e.g. 'nova-api', 'neutron-server', 'glance-api',
-      'keystone', 'cinder-api', 'rabbit', 'haproxy'.
-    - host_filter: 'server01', 'server02' or 'server03'.
-    - tenant: OpenStack tenant/project id to scope to.
-    - group_by: Return a ranked breakdown — 'service', 'level', 'host', 'module', or 'hour'.
-    - limit: How many example log lines to return (default 8, max 25).
+    - search: text to find, e.g. 'no port found', 'timeout'. Supports quoted
+      phrases, AND/OR and -negation.
+    - date_filter: window, defaulting to today. Set only when the user names a
+      period. Accepted: a day, a rolling window of N minutes/hours/days, a calendar
+      period, or an exact date. Retention is about 60 days.
+    - log_level: error, warning, info, debug, critical (comma separated). Case
+      variants handled automatically. Omitted excludes DEBUG, over half of volume.
+    - service: e.g. 'nova-api', 'neutron-server', 'keystone', 'haproxy'.
+    - host_filter: server01/02/03. tenant: OpenStack project id.
+    - group_by: ranked breakdown — service, level, host, module, hour.
+    - limit: example log lines returned (default 8, max 25).
     """
     client = OpenSearchClient()
     time_range, window_label = _time_range(date_filter)

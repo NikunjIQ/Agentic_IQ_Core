@@ -13,10 +13,58 @@ LANGCHAIN_TOOLS = [
     lookup_ticket_context,
 ]
 
+# One line per tool, for the classifier only.
+#
+# Classification answers "which system owns this question?" and returns a tool
+# NAME — it never emits arguments. Feeding it the full docstrings cost 2,829
+# tokens per question of parameter documentation and routing notes it cannot
+# act on, which on an 8,000 TPM budget was 40% of a minute spent before any
+# work began.
+#
+# What must survive is the domain boundary. The four systems watch different,
+# non-overlapping machines, and blurring that is this app's most common way to
+# produce a confidently wrong answer — so each line names the estate, not the
+# capability.
+ROUTING_SUMMARIES = {
+    "query_zabbix": (
+        "Zabbix monitoring. Cisco routers and switches (192.168.1.73/.74/.75), "
+        "Windows hosts, a few Linux boxes. Host counts and up/down status, host "
+        "groups, live problems, alerts, triggers, device metrics (CPU, memory, "
+        "traffic, disk, uptime, OS/IOS version, model, serial), config audit, "
+        "SLAs and service levels."
+    ),
+    "query_zammad": (
+        "Zammad helpdesk. Tickets only — counts, states, priorities, agents, "
+        "organisations, SLA and response times, tags, group_by breakdowns."
+    ),
+    "query_prometheus": (
+        "Prometheus. The Linux cluster server01/02/03, OpenStack, VMs and "
+        "containers — a different estate from Zabbix. CPU, memory, disk, load, "
+        "uptime, network, scrape targets, OpenStack routers/networks/volumes, "
+        "raw PromQL."
+    ),
+    "query_opensearch": (
+        "OpenSearch. OpenStack application logs only (flog-*). Holds nothing "
+        "about network devices, so a zero result means 'not collected here', "
+        "never 'nothing is wrong'."
+    ),
+    "correlate_problems_and_tickets": (
+        "Joins Zabbix problems to their Zammad tickets on an exact tag. Use for "
+        "'is anyone working on this', or to find problems with no ticket raised."
+    ),
+    "lookup_ticket_context": (
+        "The reverse join: from a Zammad ticket id back to the device and the "
+        "Zabbix problem that raised it."
+    ),
+}
+
 TOOL_REGISTRY = {
     tool_obj.name: {
         "function": tool_obj,
         "description": tool_obj.description,
+        # Falls back to the full description so a newly registered tool is
+        # routable before anyone writes its summary.
+        "routing_summary": ROUTING_SUMMARIES.get(tool_obj.name, tool_obj.description),
         "tool_object": tool_obj
     }
     for tool_obj in LANGCHAIN_TOOLS

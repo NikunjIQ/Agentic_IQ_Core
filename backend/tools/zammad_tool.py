@@ -89,39 +89,31 @@ def query_zammad(
     group_by: Optional[str] = None,
 ) -> dict:
     """
-    Query the Zammad IT helpdesk and ticketing system for ticket data, counts, states,
-    agent workload, organizations, priorities, tags, and SLA performance.
+    Query the Zammad helpdesk: tickets, states, agents, organisations, priorities,
+    tags, SLA performance.
 
-    The summary ALWAYS includes estate-wide statistics (counts by state and priority,
-    created/updated today, opened and closed in the last 10 days, unassigned count,
-    busiest agent, average first response time, SLA attainment, tickets per day this
-    month, and the largest tags), so many questions are answered without any filter.
-    Use the filters to narrow, and group_by to rank.
+    The summary ALWAYS carries estate-wide statistics (counts by state and priority,
+    created/updated today, opened and closed in the last 10 days, unassigned, busiest
+    agent, average first response, SLA attainment, largest tags), so many questions
+    need no filter at all. Filters narrow; group_by ranks.
 
-    - state_filter: Ticket state name(s), comma separated. Real states are: new, open,
-      closed, pending reminder, pending close, merged, 'Work in Progress', 'Escalated',
-      'On Hold'.
-      If the user NAMES a state ("in Open state", "Work in Progress", "escalated"), pass
-      that exact state only.
-      Pass the wider set 'open,new,Work in Progress,Escalated' ONLY when the user asks
-      generically for active/unresolved/outstanding tickets without naming a state.
-    - date_filter: ONLY set this when the user names a time period. If the question does
-      not mention one, leave this out entirely — a window nobody asked for silently
-      answers a narrower question than the one posed.
-      When a period IS named, accepted forms are: a day ('today', 'yesterday'), a calendar
-      period ('this week', 'this month'), a rolling window of N days, or an exact date.
-    - date_field: Which timestamp date_filter applies to — 'created' (default), 'updated',
-      or 'closed'. Use 'closed' for "how many tickets were closed/resolved in last N days".
-    - owner_filter: Assigned agent, by name or email. Use for "handled by <person>".
-    - customer_filter: Requester, by name or email. Use for "created by <person>".
-    - organization_filter: Organization name.
-    - priority_filter: Priority name, e.g. 'priority 2' or just '2'.
-    - group_by: Return a ranked breakdown instead of a flat list. One of: state, owner
-      (or agent), priority, organization, customer, group, day. Use this for any
-      "which X has the most tickets" question.
+    - state_filter: state name(s), comma separated. Real states: new, open, closed,
+      pending reminder, pending close, merged, 'Work in Progress', 'Escalated', 'On Hold'.
+      If the user NAMES a state, pass that exact state only. Use the wider set
+      'open,new,Work in Progress,Escalated' ONLY for a generic ask about active or
+      unresolved tickets.
+    - date_filter: ONLY set this when the user names a time period. A window nobody
+      asked for silently answers a narrower question than the one posed. Accepted: a
+      day, a calendar period, a rolling window of N days, or an exact date.
+    - date_field: which timestamp date_filter applies to — 'created' (default),
+      'updated', 'closed'. Use 'closed' for "closed/resolved in last N days".
+    - owner_filter: assigned agent ("handled by X"). customer_filter: requester
+      ("created by X"). organization_filter: organisation. priority_filter: e.g. '2'.
+    - group_by: ranked breakdown — state, owner (or agent), priority, organization,
+      customer, group, day. Use for any "which X has the most tickets".
 
-    Note: tags live outside the ticket record, so tag totals appear in the summary but
-    cannot be combined with the filters above.
+    Tags live outside the ticket record: tag totals appear in the summary but cannot
+    be combined with the filters above.
     """
     client = ZammadClient()
     tickets = client.all_tickets()

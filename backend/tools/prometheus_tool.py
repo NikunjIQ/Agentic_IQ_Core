@@ -227,17 +227,15 @@ def query_prometheus(
     range_window: Optional[str] = None,
 ) -> dict:
     """
-    Query the Prometheus monitoring system for infrastructure metrics on the Linux
-    server cluster (OpenStack). Use for CPU, memory, disk, load, uptime, network
-    throughput, scrape target health, exporter status, and any custom PromQL.
+    Query Prometheus: the Linux cluster server01/02/03, OpenStack, VMs, containers.
 
-    This covers DIFFERENT infrastructure from Zabbix. Prometheus monitors the Linux
-    servers and their services (MySQL, RabbitMQ, Elasticsearch, HAProxy, memcached,
-    ProxySQL, cAdvisor containers, OpenStack, fluentd, blackbox HTTP probes).
-    Zabbix monitors the network devices (routers, switches) and Windows hosts.
+    DIFFERENT infrastructure from Zabbix. Prometheus watches the Linux servers and
+    their services (MySQL, RabbitMQ, Elasticsearch, HAProxy, memcached, ProxySQL,
+    cAdvisor, OpenStack, fluentd, blackbox probes). Zabbix watches the network
+    devices and Windows hosts.
 
-    Pick ONE of these three modes:
-    - metric: a named shortcut. Correct PromQL is supplied for you. Prefer this.
+    Pick ONE mode:
+    - metric: a named shortcut with correct PromQL supplied. Prefer this.
       HOST metrics (the physical servers): 'cpu', 'memory', 'disk', 'load', 'uptime',
       'network_in', 'network_out', 'up', 'targets', 'alerts'.
       VIRTUAL MACHINE / OpenStack shortcuts:
@@ -248,21 +246,15 @@ def query_prometheus(
         'networks'       — how many VMs sit on private vs public networks
         'volumes'        — Cinder volumes, snapshot count, backup space used
         'containers'     — cAdvisor container series
-    - promql: a raw PromQL expression, for anything the shortcuts do not cover.
-      Use `search` first to confirm the metric name exists.
-    - search: a keyword to find metric names (e.g. 'mysql_slow', 'rabbitmq_queue').
-      Returns matching names only, no values. Use this to discover what is available
-      before writing promql.
+    - promql: a raw expression for anything the shortcuts miss. Confirm the metric
+      name with `search` first.
+    - search: keyword to discover metric names (e.g. 'mysql_slow'). Names only.
 
-    Optional narrowing:
-    - host_filter: a node name ('server01', 'server02', 'server03') or an IP.
-    - job_filter: an exporter job ('node', 'mysqld', 'rabbitmq', 'elasticsearch_exporter',
-      'haproxy', 'cadvisor', 'memcached', 'proxysql', 'libvirt_exporter', 'fluentd',
-      'blackbox_exporter', 'openstack_exporter', 'alertmanager', 'prometheus').
-    - range_window: averaging window for rate-based metrics, default '5m'.
-
-    Special values for `metric`: 'targets' lists every scrape target and its health;
-    'alerts' lists firing alerts.
+    Narrowing: host_filter ('server01'..'server03' or an IP); job_filter (exporter
+    job: node, mysqld, rabbitmq, elasticsearch_exporter, haproxy, cadvisor,
+    memcached, proxysql, libvirt_exporter, fluentd, blackbox_exporter,
+    openstack_exporter, alertmanager, prometheus); range_window (rate window,
+    default '5m').
     """
     client = PrometheusClient()
     window = (range_window or "5m").strip()

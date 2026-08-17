@@ -8,11 +8,16 @@ Each case asserts on the ARGUMENTS the model produces, not on the prose it
 writes, because arguments are checkable and prose is not.
 """
 
+import os
 import time
 
 import conftest  # noqa: F401
 
 REQUIRES_LLM = True
+
+# Seconds between extraction cases. Overridable so a run can be paced differently
+# without editing the file: IQCORE_EVAL_PACING=2 on a higher rate limit.
+PACING_SECONDS = float(os.getenv("IQCORE_EVAL_PACING", "8"))
 
 # (question, tool, {argument: expected value or None meaning "must be absent"})
 EXTRACTION_CASES = [
@@ -37,8 +42,11 @@ EXTRACTION_CASES = [
      "query_zammad", {"date_filter": None}),          # must NOT invent a window
     ("How many tickets are closed in last 10 days?",
      "query_zammad", {"date_field": "closed"}),
+    # '2' and 'priority 2' are both documented and both return the same 3,798
+    # tickets, so the expectation is the digit — the shared part. Pinning the
+    # long form failed a model that produced an equally correct answer.
     ("How many tickets are marked as priority 2?",
-     "query_zammad", {"priority_filter": "priority 2"}),
+     "query_zammad", {"priority_filter": "2"}),
 
     # Prometheus — VM shortcuts and the router ambiguity
     ("Please share total VMs running", "query_prometheus", {"metric": "vms"}),
@@ -83,7 +91,11 @@ def test_argument_extraction_matches_expectations():
                         f"{question!r}: invented {key}={actual!r} (should be absent)")
             elif actual is None or expected.lower() not in str(actual).lower():
                 failures.append(f"{question!r}: {key} expected ~{expected!r}, got {actual!r}")
-        time.sleep(1)  # stay inside the per-minute token allowance
+        # Stay inside the per-minute token allowance. Each case sends a tool
+        # schema plus the live metadata block — roughly 1,000 tokens against an
+        # 8,000/minute ceiling, so a one-second gap rate-limits the run and the
+        # failure looks like an extraction regression rather than pacing.
+        time.sleep(PACING_SECONDS)
 
     assert not failures, "extraction regressions:\n  " + "\n  ".join(failures)
 

@@ -50,7 +50,10 @@ Respond with ONLY a JSON object, no other text:
 def classify_node(state: AgentState) -> AgentState:
     streaming.status("Working out which system to check…")
     client = ChatGroq(model=CLASSIFY_MODEL, temperature=0)
-    tool_descriptions = "\n".join(f"- {name}: {entry['description']}" for name, entry in TOOL_REGISTRY.items())
+    # Routing summaries, not full docstrings. This node picks a tool name; the
+    # parameter documentation only matters once arguments are being extracted.
+    tool_descriptions = "\n".join(f"- {name}: {entry['routing_summary']}"
+                                  for name, entry in TOOL_REGISTRY.items())
     prompt = CLASSIFY_PROMPT.format(tool_descriptions=tool_descriptions)
 
     # A follow-up ("and server02?") is unroutable on its own — the system it
