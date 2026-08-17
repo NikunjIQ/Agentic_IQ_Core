@@ -55,9 +55,15 @@ can only partly see; code is not.
 
 | Job | Model | Why |
 |---|---|---|
-| Classification | `llama-3.1-8b-instant` | Small decision, cheap |
-| Argument extraction | `llama-3.1-8b-instant` | Schema forced via `tool_choice` |
-| Answer synthesis | `llama-3.3-70b-versatile` | Prose quality |
+| Classification | `openai/gpt-oss-20b` | Small decision, cheap |
+| Argument extraction | `openai/gpt-oss-20b` | Schema forced via `tool_choice` |
+| Answer synthesis | `openai/gpt-oss-120b` | Prose quality |
+
+Both ids live in `backend/agent/models.py` and can be overridden with
+`IQCORE_REASONING_MODEL` and `IQCORE_FAST_MODEL`. Providers retire models — the
+previous pair, `llama-3.3-70b-versatile` and `llama-3.1-8b-instant`, were both
+decommissioned by Groq, and the connection test now checks the ids the app will
+actually call so that shows up in the sidebar rather than mid-answer.
 
 If the small model emits a malformed tool call, extraction escalates to the large one
 rather than failing the request.

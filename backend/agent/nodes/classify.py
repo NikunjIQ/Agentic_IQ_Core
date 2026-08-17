@@ -5,7 +5,9 @@ from agent.tool_registry import TOOL_REGISTRY
 from agent.history import recent_turns
 from agent import streaming, clarify
 
-CLASSIFY_MODEL = "llama-3.1-8b-instant"
+from agent.models import FAST_MODEL
+
+CLASSIFY_MODEL = FAST_MODEL
 
 CLASSIFY_PROMPT = """You are a fast triage classifier for an IT operations assistant.
 Given a user's question, decide:

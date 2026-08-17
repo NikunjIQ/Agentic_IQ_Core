@@ -9,7 +9,7 @@ from agent import streaming, clarify, coverage
 from agent.voice import (CONVERSATIONAL_STYLE, CONVERSATIONAL_STYLE_BRIEF,
                          system_for_tools)
 
-REASONING_MODEL = "llama-3.3-70b-versatile"
+from agent.models import REASONING_MODEL
 MAX_TOOL_CALLS = 10
 PREVIEW_ROWS = 10
 

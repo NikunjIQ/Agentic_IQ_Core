@@ -175,8 +175,10 @@ def test_groq(cfg: dict) -> dict:
             return _fail("the API key was rejected")
         res.raise_for_status()
         models = [m.get("id") for m in res.json().get("data", [])]
-        needed = [m for m in ("llama-3.3-70b-versatile", "llama-3.1-8b-instant")
-                  if m not in models]
+        # Checked against the ids the app will actually call, so a retired model
+        # is reported here rather than surfacing as a 404 mid-answer.
+        from agent.models import REQUIRED_MODELS
+        needed = [m for m in REQUIRED_MODELS if m not in models]
         if needed:
             return _fail(f"key works, but these models are unavailable: {', '.join(needed)}")
         return _ok(f"Groq — key valid, {len(models)} models available")

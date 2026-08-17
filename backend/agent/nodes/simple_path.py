@@ -10,11 +10,13 @@ from agent.arg_guard import scrub
 from agent import streaming, clarify, coverage
 from agent.voice import CONVERSATIONAL_STYLE, system_for_tools
 
-SYNTHESIS_MODEL = "llama-3.3-70b-versatile"
+from agent.models import FAST_MODEL, REASONING_MODEL
+
+SYNTHESIS_MODEL = REASONING_MODEL
 # Argument extraction is a constrained task — the schema is forced via tool_choice,
 # so the model only fills in fields. The small model is sufficient here and keeps
-# the simple path from spending 70B tokens twice per question.
-FAST_MODEL = "llama-3.1-8b-instant"
+# the simple path from spending large-model tokens twice per question.
+# FAST_MODEL is re-exported above for callers that import it from this module.
 
 def simple_path_node(state: AgentState) -> AgentState:
     tool_name = state["simple_tool_choice"]
