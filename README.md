@@ -68,7 +68,7 @@ rather than failing the request.
 
 | Tool | What it answers |
 |---|---|
-| `query_zabbix` | hosts, host groups, items, problems, alerts, triggers, config audit |
+| `query_zabbix` | hosts, host groups, items, problems, alerts, triggers, config audit, SLAs and service levels. Metrics cover CPU, memory, traffic, disk, uptime, OS/IOS version, agent version, hardware model/serial, ICMP latency and loss |
 | `query_prometheus` | CPU/memory/disk/load/uptime/network, scrape targets, VMs, OpenStack routers & networks, Cinder volumes, containers, raw PromQL, metric search |
 | `query_opensearch` | OpenStack logs by date, text, level, service, host, tenant; breakdowns |
 | `query_zammad` | ticket counts, states, priorities, agents, organisations, SLA, tags, `group_by` |

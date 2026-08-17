@@ -35,6 +35,68 @@ ZABBIX_QUERIES = [
                                  "host_filter": "192.168.1.74"}, "problems"),
     ("config change of a device", {"query_type": "audit",
                                    "host_filter": "192.168.1.80"}, "Configuration changes"),
+    # Asked from the start, answerable only since the metric vocabulary grew
+    # beyond cpu/memory/traffic/disk. Uptime, OS version, model and serial come
+    # from SNMP items, not from host inventory — inventory is disabled on every
+    # host in this estate.
+    ("uptime of a router", {"query_type": "items", "host_filter": "192.168.1.73",
+                            "item_keyword": "uptime"}, "Uptime"),
+    ("IOS version of a router", {"query_type": "items", "host_filter": "192.168.1.75",
+                                 "item_keyword": "IOS version"}, "OS / software version"),
+    ("model and serial", {"query_type": "items", "host_filter": "192.168.1.75",
+                          "item_keyword": "model and serial"}, "Hardware (model / serial)"),
+    ("agent version", {"query_type": "items", "host_filter": "Nikunj VM",
+                       "item_keyword": "agent version"}, "Zabbix agent version"),
+    ("ping latency", {"query_type": "items", "host_filter": "192.168.1.73",
+                      "item_keyword": "ping latency"}, "ICMP ping"),
+    # Zabbix holds no lifecycle data at all. The expectation is that the tool
+    # says so rather than returning an empty table.
+    ("EOL/EOS of a device", {"query_type": "items", "host_filter": "192.168.1.75",
+                             "item_keyword": "EOL EOS"},
+     "does not record end-of-life"),
+    ("SLA for the estate", {"query_type": "sla"}, "SLA(s) configured"),
+    ("SLA for one device", {"query_type": "sla", "host_filter": "192.168.1.74"},
+     "against a"),
+    ("SNMP-monitored devices", {"query_type": "hosts"}, "SNMP-monitored devices"),
+    # Agent 1 vs Agent 2 cannot be told apart here: agent.variant is collected on
+    # no host. The expectation is that the answer says so rather than guessing
+    # from the version number.
+    ("Zabbix Agent 2 count", {"query_type": "hosts"}, "does not distinguish Zabbix Agent 1"),
+]
+
+# The questions this assistant was originally specified against, kept as one
+# list so coverage is checkable rather than remembered. Each maps to the entry
+# in ZABBIX_QUERIES that answers it.
+ZABBIX_SAMPLE_QUESTIONS = [
+    ("Please share total hosts", "total hosts"),
+    ("Please share total routers", "total routers"),
+    ("Please share total switches", "total switches"),
+    ("Please share the total devices which are up", "devices up"),
+    ("Please share total devices which are down", "devices down"),
+    ("What is the uptime of routers/switches/devices?", "uptime of a router"),
+    ("What is the SLA for devices/router/switches", "SLA for the estate"),
+    ("What is the EOL EOS for devices?", "EOL/EOS of a device"),
+    ("What are the current IOS running in router/switches/devices?",
+     "IOS version of a router"),
+    ("Which host group has the highest number of down devices?",
+     "host group with most down"),
+    ("What is the current cpu & memory utilization of 192.168.1.73?",
+     "cpu AND memory of a host"),
+    ("List all hosts currently in 'unreachable' or 'unknown' status",
+     "unreachable or unknown"),
+    ("How many alerts are currently active?", "active problems"),
+    ("What is the status of 192.168.1.75 host?", "status of one host"),
+    ("How many active problems are there right now?", "active problems"),
+    ("What is the network traffic of 192.168.1.73?", "network traffic"),
+    ("How many host groups are configured in Zabbix?", "host group with most down"),
+    ("How many SNMP-based devices are being monitored?", "SNMP-monitored devices"),
+    ("How many alerts were sent today?", "alerts today"),
+    ("How many devices are monitored through Zabbix Agent 2?", "Zabbix Agent 2 count"),
+    ("How many triggers are currently enabled vs disabled?",
+     "triggers enabled vs disabled"),
+    ("Tell me the problem with {DEVICE IP/NAME}?", "problem with one device"),
+    ("When was the config of {device} changed?", "config change of a device"),
+    ("How many times is the config changed?", "config change of a device"),
 ]
 
 # --- Zammad: helpdesk -------------------------------------------------------

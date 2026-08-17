@@ -65,6 +65,7 @@ example verbatim as a value.
 | `backend/agent/tool_registry.py` | The one place tools are registered |
 | `backend/tools/clients.py` | Shared API clients for all four systems |
 | `backend/tools/*_tool.py` | The four query tools |
+| `backend/tools/zabbix/` | Zabbix branch implementations — client, common, metrics, hosts, items, monitoring, sla, audit. One tool, split by kind of question |
 | `backend/tools/correlation.py` | Zabbix↔Zammad join |
 | `backend/agent/config_store.py` | Credentials saved through the UI |
 | `backend/agent/arg_guard.py` | Strips invented arguments |
@@ -140,6 +141,41 @@ inferred from names and labelled as an inference.
 
 **Neither Prometheus nor OpenSearch enforces authentication** — both answer identically
 with and without credentials.
+
+**Zabbix host inventory is switched off.** 10 of 11 hosts have `inventory_mode = disabled`;
+the eleventh is automatic and holds only latitude and longitude. So EOL/EOS, model, serial
+and OS version are *not* available from inventory, as the API docs would suggest. They come
+from SNMP items instead — `system.sw.os[sysDescr.0]`, `system.hw.model`,
+`system.hw.serialnumber`. Reading the docs alone would have produced a tool that returns
+nothing.
+
+**Zabbix holds no equipment lifecycle data at all.** No inventory field, no item. EOL/EOS
+cannot be answered from monitoring; the tool says so and hands back model and serial for an
+external lookup.
+
+**Agent 1 vs Agent 2 cannot be distinguished.** That needs the `agent.variant` item, which
+is collected on no host. `agent.version` exists on 4 hosts and reports a value on 1
+(`7.4.12`); the rest are blank because those agents are not responding.
+
+**Uptime lives under two different keys.** SNMP network kit reports
+`system.net.uptime[sysUpTime.0]`, agent hosts report `system.uptime`. Searching one key
+answers for half the estate.
+
+**Services and SLAs are configured and working** — 6 services (5 leaf services tagged
+`host: <ip>` under a root "Uptime" service), 2 SLAs both at a 90% SLO, daily and weekly.
+`sla.getsli` returns real achieved figures. Note it returns **`sli = -1` for periods before
+the SLA's effective date**: a "not measured" sentinel, not a percentage. Comparing it to the
+target scores a service that has never been down as breaching.
+
+**No maintenance windows are configured**, and no host is flagged in maintenance. Worth
+knowing because a host in maintenance is expected to be unresponsive, and the availability
+logic would currently report it as down with no ticket.
+
+**Populated Zabbix families the app does not use yet**: `event` (1,203 — problem history,
+against 51 current problems), `trend` (323k), `httptest` (3 web scenarios),
+`drule`/`dhost`/`dservice` (network discovery), `action` (10), `mediatype` (40).
+Empty, so not worth building for: `maintenance`, `correlation`, `userdirectory`, `iconmap`,
+`connector`, `proxy`, `proxygroup`.
 
 ---
 

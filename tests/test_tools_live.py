@@ -16,7 +16,7 @@ import re
 import conftest  # noqa: F401
 from golden_queries import (ZABBIX_QUERIES, ZAMMAD_QUERIES, PROMETHEUS_QUERIES,
                             OPENSEARCH_QUERIES, ZAMMAD_SUMMARY_MUST_MENTION,
-                            HONESTY_EXPECTATIONS)
+                            HONESTY_EXPECTATIONS, ZABBIX_SAMPLE_QUESTIONS)
 
 
 def _number_after(summary: str, label: str):
@@ -32,6 +32,22 @@ def test_zabbix_answers_every_expected_question():
         summary = str(result["summary"])
         assert "Error" not in summary[:40], f"{label}: {summary[:120]}"
         assert must_contain in summary, f"{label}: expected {must_contain!r} in {summary[:160]!r}"
+
+
+def test_every_original_sample_question_still_has_an_answering_query():
+    """The 24 questions the Zabbix tool was originally specified against.
+
+    The tool was built from this list, and then the list outgrew it — uptime,
+    SLA, IOS version and EOL/EOS were all asked from the start and none of them
+    was answerable. Keeping the mapping checkable means a future restructure
+    cannot quietly drop coverage the way growing the tool quietly failed to
+    add it.
+    """
+    covered = {label for label, _, _ in ZABBIX_QUERIES}
+    missing = [(question, label) for question, label in ZABBIX_SAMPLE_QUESTIONS
+               if label not in covered]
+    assert not missing, f"sample questions with no answering query: {missing}"
+    assert len(ZABBIX_SAMPLE_QUESTIONS) == 24, "the original corpus was 24 questions"
 
 
 def test_zammad_answers_every_expected_question():
@@ -171,6 +187,141 @@ def test_multi_metric_keyword_returns_every_metric_named():
                                   "item_keyword": "cpu & memory"})
     metrics = set(result["dataframe"]["metric"])
     assert {"CPU", "Memory"} <= metrics, f"got {metrics}"
+
+
+def test_uptime_is_found_under_both_key_families():
+    """SNMP kit reports system.net.uptime; agent hosts report system.uptime.
+
+    Searching only one key answered for half the estate — a router would have
+    said "no items found" while a Linux VM answered fine.
+    """
+    from tools.zabbix_tool import query_zabbix
+    snmp = query_zabbix.invoke({"query_type": "items", "host_filter": "192.168.1.73",
+                                "item_keyword": "uptime"})
+    agent = query_zabbix.invoke({"query_type": "items", "host_filter": "Nikunj VM",
+                                 "item_keyword": "uptime"})
+    for label, result in (("SNMP host", snmp), ("agent host", agent)):
+        assert "Uptime" in result["summary"], f"{label}: {result['summary'][:200]}"
+        assert not result["dataframe"].empty, f"{label} returned no uptime rows"
+        # Rendered as a duration, not as a bare seconds count.
+        assert "d" in str(result["dataframe"]["display_value"].iloc[0])
+
+
+def test_uptime_of_zero_is_reported_as_not_collected():
+    """A running device never has zero uptime, so 0 means nothing came back.
+
+    'Windows' has a configured uptime item and an agent that is not responding.
+    Passing the 0 through would claim the host had just been rebooted.
+    """
+    from tools.zabbix_tool import query_zabbix
+    result = query_zabbix.invoke({"query_type": "items", "host_filter": "Windows",
+                                  "item_keyword": "uptime"})
+    assert "no reading collected" in result["summary"], result["summary"][:200]
+    assert "0d" not in result["summary"]
+
+
+def test_version_and_hardware_readings_are_not_sorted_numerically():
+    """Version strings have no ordering, and _numeric sinks them all to -inf."""
+    from tools.zabbix_tool import query_zabbix
+    result = query_zabbix.invoke({"query_type": "items", "host_filter": "192.168.1.75",
+                                  "item_keyword": "IOS version and model"})
+    summary = result["summary"]
+    assert "OS / software version" in summary and "Hardware" in summary, summary[:300]
+    assert "highest first" not in summary, "text readings must not claim an ordering"
+
+
+def test_long_device_descriptions_do_not_swamp_the_summary():
+    """Cisco sysDescr is a multi-line block with a support URL and a copyright.
+
+    Passed through whole it crowded out every other metric in the summary the
+    model reads.
+    """
+    from tools.zabbix_tool import query_zabbix
+    result = query_zabbix.invoke({"query_type": "items", "host_filter": "192.168.1.73",
+                                  "item_keyword": "IOS version"})
+    assert "\n" not in result["summary"], "raw newlines leaked into the summary"
+    for value in result["dataframe"]["display_value"]:
+        assert len(str(value)) <= 140, f"untrimmed reading: {str(value)[:80]}"
+
+
+def test_eol_says_zabbix_does_not_hold_it_and_offers_the_identifiers():
+    """Zabbix models no equipment lifecycle. An empty table would read as "fine"."""
+    from tools.zabbix_tool import query_zabbix
+    result = query_zabbix.invoke({"query_type": "items", "host_filter": "192.168.1.75",
+                                  "item_keyword": "EOL EOS"})
+    summary = result["summary"]
+    assert "does not record end-of-life" in summary, summary[:300]
+    # The model and serial an external lookup would need come back with it.
+    assert "Hardware (model / serial)" in summary, summary[:300]
+
+
+def test_metric_keywords_do_not_fire_on_substrings():
+    """'os' sits inside 'hosts' and 'ram' inside 'program'."""
+    from tools.zabbix_tool import requested_metrics
+    for text in ("hosts", "how many devices are up", "program"):
+        assert requested_metrics(text) == [], f"{text!r} matched a metric"
+    # ...while the real keywords still resolve.
+    assert [m["label"] for m in requested_metrics("cpu & memory")] == ["CPU", "Memory"]
+
+
+def test_sla_reports_target_and_achieved_figure():
+    """'What is the SLA for devices' — answerable since the Services branch."""
+    from tools.zabbix_tool import query_zabbix
+    result = query_zabbix.invoke({"query_type": "sla"})
+    summary = result["summary"]
+    assert "SLA(s) configured" in summary, summary[:200]
+    df = result["dataframe"]
+    assert not df.empty and {"slo_target_pct", "current_sli_pct"} <= set(df.columns)
+    # A target without an achieved figure is half an answer.
+    assert df["slo_target_pct"].notna().any()
+    assert df["current_sli_pct"].notna().any()
+
+
+def test_sla_unmeasured_periods_are_not_scored_as_breaches():
+    """Zabbix returns sli = -1 for periods before the SLA's effective date.
+
+    It is a "not measured" sentinel, not a percentage. Compared against the
+    target it made a service that has never been down report as breaching.
+    """
+    from tools.zabbix_tool import query_zabbix
+    df = query_zabbix.invoke({"query_type": "sla"})["dataframe"]
+    measured = df[df["current_sli_pct"].notna()]
+    assert not measured.empty
+    assert (measured["current_sli_pct"] >= 0).all(), "a sentinel leaked in as a percentage"
+    for _, row in measured.iterrows():
+        if row["current_sli_pct"] >= row["slo_target_pct"] and row["downtime_s"] == 0:
+            assert row["periods_below_target"] == 0, (
+                f"{row['service']} has no downtime and meets target, but "
+                f"{row['periods_below_target']} period(s) were scored as breaches")
+
+
+def test_sla_resolves_a_device_name_to_its_ip_tagged_service():
+    """Services are tagged by IP; people ask by name.
+
+    'Nikunj VM' is 192.168.1.152 and 'Windows' is 192.168.1.104 — without
+    device resolution both questions return nothing.
+    """
+    from tools.zabbix_tool import query_zabbix
+    for name, expected_ip in (("Nikunj VM", "192.168.1.152"), ("Windows", "192.168.1.104")):
+        df = query_zabbix.invoke({"query_type": "sla", "host_filter": name})["dataframe"]
+        assert not df.empty, f"{name} resolved to no service"
+        assert set(df["service"]) == {expected_ip}, f"{name} -> {set(df['service'])}"
+
+
+def test_sla_says_when_a_device_has_no_service_level_defined():
+    """No SLA coverage is a configuration gap, not a healthy result."""
+    from tools.zabbix_tool import query_zabbix
+    result = query_zabbix.invoke({"query_type": "sla", "host_filter": "192.168.1.80"})
+    summary = result["summary"]
+    assert "none of them covers" in summary, summary[:250]
+    assert "configuration gap" in summary
+
+
+def test_sla_names_services_that_no_sla_measures():
+    """"Meeting its target" and "never measured" must not look alike."""
+    from tools.zabbix_tool import query_zabbix
+    summary = query_zabbix.invoke({"query_type": "sla"})["summary"]
+    assert "not covered by any SLA" in summary, summary[-400:]
 
 
 def test_traffic_returns_throughput_not_discard_counters():
