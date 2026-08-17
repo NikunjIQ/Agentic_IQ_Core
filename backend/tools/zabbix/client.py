@@ -5,6 +5,38 @@ import os
 import requests
 
 
+def _login(url, headers, username, password):
+    """Exchange username and password for a session id.
+
+    Returns (session_id, legacy). Zabbix renamed user.login's "user" parameter
+    to "username" in 6.0 and removed the old spelling in 6.4, so a 7.x server
+    rejects "user" outright. The modern name is tried first and the old one only
+    as a fallback, which keeps this working against an older server without
+    silently failing on a current one.
+
+    Which spelling succeeded also tells the caller how to present the session:
+    6.4+ dropped the "auth" request field and expects the session id in the
+    Authorization header instead, exactly like an API token.
+    """
+    for field, legacy in (("username", False), ("user", True)):
+        response = requests.post(url, headers=headers, timeout=10, json={
+            "jsonrpc": "2.0",
+            "method": "user.login",
+            "params": {field: username, "password": password},
+            "id": 1,
+        })
+        response.raise_for_status()
+        payload = response.json()
+        if payload.get("result"):
+            return payload["result"], legacy
+        error = payload.get("error") or {}
+        # Only an argument-shape complaint is worth retrying under the other
+        # spelling. Wrong credentials must surface, not be tried twice.
+        if "parameter" not in str(error.get("data", "")).lower():
+            raise Exception(error or "user.login returned no result")
+    raise Exception("user.login failed under both 'username' and 'user'")
+
+
 def build_rpc():
     """Return a callable issuing authenticated JSON-RPC calls.
 
@@ -30,15 +62,14 @@ def build_rpc():
         headers["Authorization"] = f"Bearer {zabbix_token}"
         auth_param = None
     elif zabbix_user and zabbix_pass:
-        login_payload = {
-            "jsonrpc": "2.0",
-            "method": "user.login",
-            "params": {"user": zabbix_user, "password": zabbix_pass},
-            "id": 1
-        }
-        res = requests.post(zabbix_url, headers=headers, json=login_payload, timeout=10)
-        res.raise_for_status()
-        auth_param = res.json().get("result")
+        session, legacy = _login(zabbix_url, headers, zabbix_user, zabbix_pass)
+        # 6.4+ carries the session in the header and rejects a payload "auth"
+        # outright; only a pre-6.4 server still wants it in the request body.
+        if legacy:
+            auth_param = session
+        else:
+            headers["Authorization"] = f"Bearer {session}"
+            auth_param = None
     else:
         auth_param = None
 

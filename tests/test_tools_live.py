@@ -264,6 +264,30 @@ def test_metric_keywords_do_not_fire_on_substrings():
     assert [m["label"] for m in requested_metrics("cpu & memory")] == ["CPU", "Memory"]
 
 
+def test_username_password_auth_works_alongside_the_token():
+    """The user/pass fallback was broken twice over and nothing noticed.
+
+    It is dead code whenever ZABBIX_API_TOKEN is set, which is how it stayed
+    broken: user.login's "user" parameter became "username" in 6.0 and was
+    removed in 6.4, and 6.4 also dropped the payload "auth" field in favour of
+    the Authorization header. Anyone configuring username and password through
+    the sidebar instead of a token hit both.
+    """
+    import os
+    from tools.zabbix.client import build_rpc
+
+    if not (os.getenv("ZABBIX_USER") and os.getenv("ZABBIX_PASS")):
+        return   # nothing to check on an installation that only has a token
+
+    original = os.environ.get("ZABBIX_API_TOKEN", "")
+    os.environ["ZABBIX_API_TOKEN"] = ""
+    try:
+        count = build_rpc()("host.get", {"countOutput": True})
+    finally:
+        os.environ["ZABBIX_API_TOKEN"] = original
+    assert int(count) > 0, "user/pass auth returned no hosts"
+
+
 def test_sla_reports_target_and_achieved_figure():
     """'What is the SLA for devices' — answerable since the Services branch."""
     from tools.zabbix_tool import query_zabbix
