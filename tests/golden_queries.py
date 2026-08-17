@@ -41,8 +41,16 @@ ZABBIX_QUERIES = [
     # host in this estate.
     ("uptime of a router", {"query_type": "items", "host_filter": "192.168.1.73",
                             "item_keyword": "uptime"}, "Uptime"),
+    # The questions as actually asked are about a CLASS of device, not one host.
+    # Mapping them to a single-device call made the eval pass while the real
+    # question ("what is the uptime of routers/switches") returned nothing.
+    ("uptime across a group", {"query_type": "items", "group_filter": "Routers",
+                               "item_keyword": "uptime"}, "across 2 host(s)"),
     ("IOS version of a router", {"query_type": "items", "host_filter": "192.168.1.75",
                                  "item_keyword": "IOS version"}, "OS / software version"),
+    ("IOS version across a group", {"query_type": "items", "group_filter": "Routers",
+                                    "item_keyword": "IOS version"},
+     "OS / software version"),
     ("model and serial", {"query_type": "items", "host_filter": "192.168.1.75",
                           "item_keyword": "model and serial"}, "Hardware (model / serial)"),
     ("agent version", {"query_type": "items", "host_filter": "Nikunj VM",
@@ -73,11 +81,11 @@ ZABBIX_SAMPLE_QUESTIONS = [
     ("Please share total switches", "total switches"),
     ("Please share the total devices which are up", "devices up"),
     ("Please share total devices which are down", "devices down"),
-    ("What is the uptime of routers/switches/devices?", "uptime of a router"),
+    ("What is the uptime of routers/switches/devices?", "uptime across a group"),
     ("What is the SLA for devices/router/switches", "SLA for the estate"),
     ("What is the EOL EOS for devices?", "EOL/EOS of a device"),
     ("What are the current IOS running in router/switches/devices?",
-     "IOS version of a router"),
+     "IOS version across a group"),
     ("Which host group has the highest number of down devices?",
      "host group with most down"),
     ("What is the current cpu & memory utilization of 192.168.1.73?",

@@ -207,6 +207,48 @@ def test_uptime_is_found_under_both_key_families():
         assert "d" in str(result["dataframe"]["display_value"].iloc[0])
 
 
+def test_a_metric_can_be_read_across_a_whole_group():
+    """"What is the uptime of the routers" is one question, not one per device.
+
+    The items branch used to require a single host_filter and ignore
+    group_filter entirely, so a question about a class of device could only be
+    answered by naming each host. The model routed such questions to
+    query_type='hosts' instead, which reports up/down and cannot report a metric
+    at all — the answer said "2 routers, both up, go and check their uptime
+    in Zabbix".
+    """
+    from tools.zabbix_tool import query_zabbix
+    result = query_zabbix.invoke({"query_type": "items", "group_filter": "Routers",
+                                  "item_keyword": "uptime"})
+    summary = result["summary"]
+    df = result["dataframe"]
+    assert "across 2 host(s)" in summary, summary[:200]
+    assert set(df["host"]) == {"192.168.1.74", "192.168.1.75"}, set(df["host"])
+    # Every device reports its own reading, not one shared figure.
+    assert df["display_value"].nunique() == 2, df[["host", "display_value"]].to_dict()
+
+
+def test_a_group_name_given_as_host_filter_still_resolves():
+    """People ask for "the uptime for switches"; 'switches' is a group, not a host.
+
+    Without the fallback this answered "could not find a host matching
+    'switches'" and stopped.
+    """
+    from tools.zabbix_tool import query_zabbix
+    result = query_zabbix.invoke({"query_type": "items", "host_filter": "switches",
+                                  "item_keyword": "uptime"})
+    assert "could not find" not in result["summary"].lower(), result["summary"][:200]
+    assert "Uptime" in result["summary"]
+    assert not result["dataframe"].empty
+
+
+def test_an_unknown_scope_is_named_as_neither_host_nor_group():
+    from tools.zabbix_tool import query_zabbix
+    summary = query_zabbix.invoke({"query_type": "items", "host_filter": "toasters",
+                                   "item_keyword": "uptime"})["summary"]
+    assert "host or host group" in summary, summary[:200]
+
+
 def test_uptime_of_zero_is_reported_as_not_collected():
     """A running device never has zero uptime, so 0 means nothing came back.
 
