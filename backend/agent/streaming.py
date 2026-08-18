@@ -11,6 +11,7 @@ nodes publish events here. A context variable carries the emitter, set inside
 that thread so the nodes can find it without threading it through the state.
 """
 
+import contextlib
 import contextvars
 import queue
 
@@ -27,6 +28,12 @@ class Emitter:
 
     def status(self, message: str):
         self.events.put({"type": "status", "message": message})
+
+    def node(self, name: str, phase: str):
+        self.events.put({"type": "node", "node": name, "phase": phase})
+
+    def tool(self, name: str):
+        self.events.put({"type": "tool", "tool": name})
 
     def token(self, text: str):
         if text:
@@ -54,6 +61,33 @@ def status(message: str):
     emitter = _current.get()
     if emitter is not None:
         emitter.status(message)
+
+
+def tool_started(name: str):
+    """Name the tool now running, for callers that draw the run."""
+    emitter = _current.get()
+    if emitter is not None:
+        emitter.tool(name)
+
+
+@contextlib.contextmanager
+def node(name: str):
+    """Mark a graph node as entered and left.
+
+    The status messages are written for a person to read; these carry the node's
+    identity instead, so a caller can light up the graph as it executes. The exit
+    event is emitted from a finally block, because a node that raises has still
+    stopped running and the drawing must not leave it spinning forever.
+    """
+    emitter = _current.get()
+    if emitter is None:
+        yield
+        return
+    emitter.node(name, "enter")
+    try:
+        yield
+    finally:
+        emitter.node(name, "exit")
 
 
 def stream_text(client, messages):

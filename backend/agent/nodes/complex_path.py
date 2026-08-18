@@ -91,7 +91,7 @@ Live System Schema (use EXACT values from this list when extracting arguments):
 {live_schema}
 """
 
-def complex_path_node(state: AgentState) -> AgentState:
+def _complex_path_node_impl(state: AgentState) -> AgentState:
     client = ChatGroq(model=REASONING_MODEL, temperature=0)
 
     live_schema = fetch_live_metadata()
@@ -151,6 +151,7 @@ def complex_path_node(state: AgentState) -> AgentState:
             tools_called.append(tool_name)
             tool_call_count += 1
 
+            streaming.tool_started(tool_name)
             streaming.status(f"Querying {tool_name.replace('query_', '').replace('_', ' ').title()}…")
             tool_entry = TOOL_REGISTRY.get(tool_name)
             call_key = (tool_name, json.dumps(tool_args, sort_keys=True, default=str))
@@ -232,3 +233,9 @@ def complex_path_node(state: AgentState) -> AgentState:
     if coverage_notes:
         state["coverage_notes"] = coverage_notes
     return state
+
+
+def complex_path_node(state: AgentState) -> AgentState:
+    """Run the node, bracketed by the events that let a caller draw the run."""
+    with streaming.node("complex_path"):
+        return _complex_path_node_impl(state)

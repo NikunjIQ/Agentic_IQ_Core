@@ -3,6 +3,8 @@ import os
 
 import requests
 import pandas as pd
+
+import live_graph
 import streamlit as st
 
 def _backend_url() -> str:
@@ -35,6 +37,8 @@ if "suggestions" not in st.session_state:
     st.session_state.suggestions = []
 if "pending_question" not in st.session_state:
     st.session_state.pending_question = None
+if "show_live_graph" not in st.session_state:
+    st.session_state.show_live_graph = True
 
 
 def backend(method: str, path: str, **kwargs):
@@ -44,12 +48,27 @@ def backend(method: str, path: str, **kwargs):
     return response.json()
 
 
-def stream_answer(question: str, history: list, result_holder: dict, status_holder):
+def stream_answer(question: str, history: list, result_holder: dict, status_holder,
+                  graph_holder=None):
     """Yield answer text as it arrives, collecting the full payload on the side.
 
     st.write_stream only returns the concatenated text, so the tables and debug
     data are captured into result_holder rather than returned.
+
+    The same stream carries node events, so when a graph_holder is supplied the
+    graph is redrawn as the run moves through it.
     """
+    node_states = {}
+    current_tool = ""
+
+    def redraw(note=""):
+        if graph_holder is not None:
+            graph_holder.markdown(
+                live_graph.render(node_states, current_tool, note),
+                unsafe_allow_html=True)
+
+    redraw("starting…")
+
     with requests.post(f"{BACKEND_URL}/chat/stream",
                        json={"question": question, "conversation_history": history},
                        stream=True, timeout=300) as response:
@@ -61,14 +80,24 @@ def stream_answer(question: str, history: list, result_holder: dict, status_hold
             kind = event.get("type")
             if kind == "token":
                 yield event.get("text", "")
+            elif kind == "node":
+                name, phase = event.get("node"), event.get("phase")
+                node_states[name] = "active" if phase == "enter" else "done"
+                redraw()
+            elif kind == "tool":
+                current_tool = f"running {event.get('tool', '')}"
+                redraw()
             elif kind == "status":
                 # Progress is where the seconds actually go — tools, not tokens.
                 status_holder.caption(f"⏳ {event.get('message', '')}")
             elif kind == "done":
                 status_holder.empty()
                 result_holder.update(event.get("payload") or {})
+                current_tool = ""
+                redraw("finished")
             elif kind == "error":
                 status_holder.empty()
+                redraw("failed")
                 yield f"\n\n{event.get('message', 'Something went wrong.')}"
 
 
@@ -145,6 +174,9 @@ with st.sidebar:
         render_results(st.session_state.test_results)
 
     st.divider()
+    st.toggle("Show the graph while it runs", key="show_live_graph",
+              help="Draws which node is executing and which tool is being called, "
+                   "live, as the answer is produced.")
     st.caption(f"Stored at `{config['path']}`")
     if st.button("Clear chat", use_container_width=True):
         st.session_state.conversation_history = []
@@ -169,10 +201,14 @@ if user_input:
 
     with st.chat_message("assistant"):
         status_holder = st.empty()
+        # The graph is drawn above the answer so the route is visible while the
+        # tools are still running, which is where the seconds actually go.
+        graph_holder = st.empty() if st.session_state.get("show_live_graph") else None
         result = {}
         try:
             answer = st.write_stream(stream_answer(
-                user_input, st.session_state.conversation_history, result, status_holder))
+                user_input, st.session_state.conversation_history, result, status_holder,
+                graph_holder))
             status_holder.empty()
 
             if result.get("cached"):

@@ -715,3 +715,55 @@ def test_cache_reports_stats():
     stats = answer_cache.stats()
     assert stats["hits"] >= 1 and stats["misses"] >= 1
     assert 0.0 <= stats["hit_rate"] <= 1.0
+
+
+def test_every_graph_node_announces_itself():
+    """The live view is driven by node events, not by parsing status prose.
+
+    Status messages are written for a person to read and change freely; these
+    carry the node's identity. A node that stops emitting them would leave the
+    drawing stuck mid-run with no error anywhere.
+    """
+    import threading
+    from agent import streaming
+    from agent.graph import COMPILED_GRAPH
+
+    emitter = streaming.Emitter()
+    seen = []
+
+    def run():
+        streaming.set_emitter(emitter)
+        try:
+            COMPILED_GRAPH.invoke({
+                "question": "how many host groups are configured in zabbix?",
+                "conversation_history": [], "complexity": None,
+                "simple_tool_choice": None, "tool_results_raw": [],
+                "dataframes": [], "tools_called": [], "final_answer": None,
+            })
+            emitter.finish({})
+        except Exception as exc:            # a failed run must still close its nodes
+            emitter.fail(str(exc))
+
+    threading.Thread(target=run, daemon=True).start()
+    while True:
+        event = emitter.events.get()
+        if event is streaming.DONE:
+            break
+        if event.get("type") == "node":
+            seen.append((event["node"], event["phase"]))
+
+    entered = [n for n, phase in seen if phase == "enter"]
+    exited = [n for n, phase in seen if phase == "exit"]
+    assert "classify" in entered, f"classify never announced itself: {seen}"
+    assert "respond" in entered, f"respond never announced itself: {seen}"
+    # Every node that opened must close, or the drawing spins forever.
+    assert sorted(entered) == sorted(exited), f"unbalanced node events: {seen}"
+
+
+def test_node_events_are_silent_when_not_streaming():
+    """The context manager must no-op outside a streamed request."""
+    from agent import streaming
+    assert streaming.get_emitter() is None
+    with streaming.node("classify"):
+        pass          # must not raise without an emitter
+    streaming.tool_started("query_zabbix")

@@ -8,7 +8,7 @@ from agent.state import AgentState
 from agent import clarify, streaming
 
 
-def clarify_node(state: AgentState) -> AgentState:
+def _clarify_node_impl(state: AgentState) -> AgentState:
     question = clarify.build(state.get("clarify_axis") or "system", state["question"])
 
     # The text is not model output, so stream it explicitly or a streaming client
@@ -24,3 +24,9 @@ def clarify_node(state: AgentState) -> AgentState:
                                   "result": {"summary": "asked the user to clarify"}}]
     state["dataframes"] = []
     return state
+
+
+def clarify_node(state: AgentState) -> AgentState:
+    """Run the node, bracketed by the events that let a caller draw the run."""
+    with streaming.node("clarify"):
+        return _clarify_node_impl(state)

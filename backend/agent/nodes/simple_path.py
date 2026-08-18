@@ -18,7 +18,7 @@ SYNTHESIS_MODEL = REASONING_MODEL
 # the simple path from spending large-model tokens twice per question.
 # FAST_MODEL is re-exported above for callers that import it from this module.
 
-def simple_path_node(state: AgentState) -> AgentState:
+def _simple_path_node_impl(state: AgentState) -> AgentState:
     tool_name = state["simple_tool_choice"]
     tool_entry = TOOL_REGISTRY.get(tool_name)
 
@@ -84,6 +84,7 @@ def simple_path_node(state: AgentState) -> AgentState:
                                           "result": {"error": "argument extraction failed"}}]
             return state
 
+    streaming.tool_started(tool_name)
     streaming.status(f"Querying {tool_name.replace('query_', '').title()}…")
     try:
         result = tool_entry["function"].invoke(tool_args)
@@ -133,3 +134,7 @@ def simple_path_node(state: AgentState) -> AgentState:
     return state
 
 
+def simple_path_node(state: AgentState) -> AgentState:
+    """Run the node, bracketed by the events that let a caller draw the run."""
+    with streaming.node("simple_path"):
+        return _simple_path_node_impl(state)

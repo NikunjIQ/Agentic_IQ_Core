@@ -47,7 +47,7 @@ Respond with ONLY a JSON object, no other text:
 }}
 """
 
-def classify_node(state: AgentState) -> AgentState:
+def _classify_node_impl(state: AgentState) -> AgentState:
     streaming.status("Working out which system to check…")
     client = ChatGroq(model=CLASSIFY_MODEL, temperature=0)
     # Routing summaries, not full docstrings. This node picks a tool name; the
@@ -89,3 +89,9 @@ def classify_node(state: AgentState) -> AgentState:
     state["clarify_axis"] = axis
 
     return state
+
+
+def classify_node(state: AgentState) -> AgentState:
+    """Run the node, bracketed by the events that let a caller draw the run."""
+    with streaming.node("classify"):
+        return _classify_node_impl(state)
