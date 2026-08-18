@@ -491,3 +491,67 @@ def test_prometheus_rejects_promql_injection():
     promql = str(result["raw"].get("promql", ""))
     assert '"' not in promql.split('instance=~"')[-1].split('"')[0]
     assert "vector(1)" not in promql
+
+
+def test_zammad_tag_filter_uses_the_tag_taxonomy():
+    """Tags are a real taxonomy here, and were unusable as a filter.
+
+    110 tags with structured prefixes — class:, component:, scope:, target:,
+    host:. 'host: 192.168.1.73' is an exact device-to-ticket key, better than
+    parsing it out of the ticket body.
+    """
+    from tools.zammad_tool import query_zammad
+    result = query_zammad.invoke({"tag_filter": "host: 192.168.1.73"})
+    assert "tags include" in result["summary"], result["summary"][-300:]
+    assert not result["dataframe"].empty
+
+
+def test_zammad_search_cap_is_reported_as_a_minimum():
+    """Zammad's search returns at most 200 rows whatever limit is asked for.
+
+    200, 500, 1000 and 2000 all come back with 200, so a tag with more tickets
+    than that reads as exactly 200 unless the ceiling is stated. 'class: os' is
+    on 2,270 tickets.
+    """
+    from tools.zammad_tool import query_zammad
+    summary = query_zammad.invoke({"tag_filter": "class: os"})["summary"]
+    assert "MINIMUM, not a total" in summary, summary[-400:]
+    # The authoritative figure from the tag index comes back with it.
+    assert "tag index counts" in summary
+
+
+def test_zammad_sla_attainment_states_its_coverage():
+    """"96% within SLA" is measured on 24 of 3,825 tickets.
+
+    The figure is Zammad's own, not recomputed, but without the coverage it
+    reads as an estate-wide health statement and is not one.
+    """
+    from tools.zammad_tool import query_zammad
+    summary = query_zammad.invoke({})["summary"]
+    assert "SLA policies configured" in summary, "SLA targets missing"
+    if "First response SLA" in summary:
+        assert "of the estate" in summary, "SLA attainment given without its coverage"
+
+
+def test_zammad_named_queue_resolves_to_zammad_own_view():
+    """Overview conditions are arbitrary; the server evaluates its own view."""
+    from tools.zammad_tool import query_zammad
+    result = query_zammad.invoke({"overview": "Escalated Tickets"})
+    assert "in queue 'Escalated Tickets'" in result["summary"], result["summary"][-250:]
+    bad = query_zammad.invoke({"overview": "Nonexistent Queue"})
+    assert "No Zammad queue named" in bad["summary"]
+    assert "Available:" in bad["summary"], "an unknown queue should name the real ones"
+
+
+def test_zammad_ticket_conversation_is_reachable():
+    """Articles carry the Zabbix problem detail and any human replies."""
+    from tools.zammad_tool import query_zammad
+    result = query_zammad.invoke({"ticket_reference": "904298"})
+    summary = result["summary"]
+    assert "article(s)" in summary, summary[:200]
+    assert "Tags:" in summary
+    assert not result["dataframe"].empty
+    # HTML email bodies must not reach the summary as markup.
+    assert "<div>" not in summary
+    missing = query_zammad.invoke({"ticket_reference": "999999"})
+    assert "No ticket found" in missing["summary"]

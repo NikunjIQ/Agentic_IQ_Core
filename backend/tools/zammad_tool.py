@@ -28,7 +28,21 @@ _GROUP_DIMENSIONS = {
     "customer": "customer_email",
     "group": "group_name",
     "day": "created_date",
+    # 'tag' is handled separately: tags are not a ticket column, so the
+    # breakdown comes from Zammad's tag index rather than from the dataframe.
 }
+
+# Minutes are how Zammad stores SLA targets; hours read better past a point.
+def _target_label(minutes) -> str:
+    try:
+        value = int(minutes)
+    except (TypeError, ValueError):
+        return "not set"
+    if value < 60:
+        return f"{value}m"
+    if value % 60 == 0 and value < 1440:
+        return f"{value // 60}h"
+    return f"{value // 60}h {value % 60}m" if value < 1440 else f"{value / 1440:.1f}d"
 
 
 def _window_mask(df: pd.DataFrame, column: str, date_filter: str) -> Optional[pd.Series]:
@@ -87,6 +101,9 @@ def query_zammad(
     organization_filter: Optional[str] = None,
     priority_filter: Optional[str] = None,
     group_by: Optional[str] = None,
+    tag_filter: Optional[str] = None,
+    overview: Optional[str] = None,
+    ticket_reference: Optional[str] = None,
 ) -> dict:
     """
     Query the Zammad helpdesk: tickets, states, agents, organisations, priorities,
@@ -110,10 +127,16 @@ def query_zammad(
     - owner_filter: assigned agent ("handled by X"). customer_filter: requester
       ("created by X"). organization_filter: organisation. priority_filter: e.g. '2'.
     - group_by: ranked breakdown — state, owner (or agent), priority, organization,
-      customer, group, day. Use for any "which X has the most tickets".
-
-    Tags live outside the ticket record: tag totals appear in the summary but cannot
-    be combined with the filters above.
+      customer, group, day, tag. Use for any "which X has the most tickets".
+    - tag_filter: one or more tags, comma separated, ALL of which must be present.
+      Tags are a real taxonomy here: 'class: os', 'component: cpu', 'scope: capacity',
+      'target: windows', 'host: 192.168.1.73'. Use for "tickets about storage",
+      "tickets for <device>". Resolved server-side, so it does not need the estate.
+    - overview: a named Zammad queue, e.g. 'Unassigned & Open Tickets', 'Escalated
+      Tickets', 'Work in progress', 'ON Hold'. Use when the question names a queue
+      rather than a state.
+    - ticket_reference: a ticket number or id. Returns that ticket's conversation
+      (articles) and any time booked against it.
     """
     client = ZammadClient()
     tickets = client.all_tickets()
@@ -224,15 +247,59 @@ def query_zammad(
             parts.append(f"Average first response time: {responded.mean():.1f} minutes "
                          f"(median {responded.median():.1f}, measured on {len(responded)} tickets).")
 
+    # What the targets actually are. Attainment without the target is half an
+    # answer: "96% within SLA" says nothing about which SLA or how demanding it is.
+    sla_definitions = client.slas()
+    if sla_definitions:
+        described = "; ".join(
+            f"'{s.get('name')}' (first response {_target_label(s.get('first_response_time'))}, "
+            f"update {_target_label(s.get('update_time'))}, "
+            f"resolution {_target_label(s.get('solution_time'))})"
+            for s in sla_definitions)
+        parts.append(f"SLA policies configured: {len(sla_definitions)} — {described}.")
+
     for flag, label in (("sla_first_response_met", "First response SLA"),
                         ("sla_close_met", "Resolution SLA")):
         if flag in df.columns:
             measured = df[flag].dropna()
             if not measured.empty:
                 met = int(measured.sum())
+                # The percentage is over tickets Zammad actually scored, which is
+                # a small slice of the estate. Stating the coverage stops "96%
+                # within SLA" reading as an estate-wide health figure.
+                coverage = len(measured) / len(df) * 100
                 parts.append(f"{label}: {met} met, {len(measured) - met} breached, "
                              f"of {len(measured)} tickets with an SLA target "
-                             f"({met / len(measured) * 100:.0f}% within SLA).")
+                             f"({met / len(measured) * 100:.0f}% within SLA). "
+                             f"NOTE: that covers {len(measured)} of {len(df)} tickets "
+                             f"({coverage:.1f}% of the estate) — the rest were never "
+                             f"scored against an SLA.")
+
+    # Booked time. The ticket payload carries time_unit, but the accounting
+    # endpoint is what attributes it, so totals come from there.
+    entries = client.time_accountings()
+    if entries:
+        booked = 0.0
+        per_ticket = {}
+        for entry in entries:
+            try:
+                units = float(entry.get("time_unit") or 0)
+            except (TypeError, ValueError):
+                continue
+            booked += units
+            key = entry.get("ticket_id")
+            per_ticket[key] = per_ticket.get(key, 0.0) + units
+        if per_ticket:
+            busiest = max(per_ticket.items(), key=lambda kv: kv[1])
+            parts.append(f"Time booked: {booked:.1f} unit(s) across {len(entries)} entries "
+                         f"on {len(per_ticket)} ticket(s) — most on ticket id {busiest[0]} "
+                         f"({busiest[1]:.1f}). Time is recorded on "
+                         f"{len(per_ticket)} of {len(df)} tickets.")
+
+    queues = client.overviews()
+    if queues:
+        parts.append(f"Named queues (overviews) available: "
+                     f"{', '.join(repr(o.get('name')) for o in queues[:12])}.")
 
     org_counts = df[df["organization_name"] != "(none)"]["organization_name"].value_counts()
     if not org_counts.empty:
@@ -246,9 +313,106 @@ def query_zammad(
 
     summary = " ".join(parts)
 
+    # ---------------- one ticket's conversation ----------------
+    # Answered before the estate filters, because "what was said on #904298" is a
+    # question about one ticket rather than a narrowing of the whole estate.
+    if ticket_reference:
+        reference = str(ticket_reference).strip().lstrip("#")
+        match = df[df["number"].astype(str) == reference] if "number" in df.columns else df.head(0)
+        if match.empty and "id" in df.columns:
+            match = df[df["id"].astype(str) == reference]
+        if match.empty:
+            return {"summary": f"No ticket found matching '{ticket_reference}'.",
+                    "dataframe": pd.DataFrame(), "raw": {}}
+
+        row = match.iloc[0]
+        ticket_id = row.get("id")
+        articles = client.articles(ticket_id)
+        tags = client.ticket_tags(ticket_id)
+        booked = [e for e in client.time_accountings()
+                  if str(e.get("ticket_id")) == str(ticket_id)]
+        spent = sum(float(e.get("time_unit") or 0) for e in booked)
+
+        detail = [f"Ticket #{row.get('number')} — {row.get('title')!r}. "
+                  f"State: {row.get('state_name')}. Priority: {row.get('priority_name')}. "
+                  f"Owner: {row.get('owner_name')}. Customer: {row.get('customer_email')}."]
+        if tags:
+            detail.append(f"Tags: {', '.join(tags)}.")
+        detail.append(f"Time booked: {spent:.1f} unit(s) across {len(booked)} entry(ies)."
+                      if booked else "No time has been booked against this ticket.")
+        detail.append(f"Conversation: {len(articles)} article(s).")
+
+        rows = []
+        for article in articles:
+            body = " ".join(str(article.get("body") or "").split())
+            # Zammad stores HTML for email articles; the tags carry no meaning
+            # for a reader and swamp the summary.
+            body = re.sub(r"<[^>]+>", " ", body)
+            body = " ".join(body.split())
+            rows.append({"from": article.get("from"), "type": article.get("type"),
+                         "internal": article.get("internal"),
+                         "created_at": article.get("created_at"),
+                         "body": body[:400]})
+        for article in rows[:6]:
+            detail.append(f"[{article['type']}] {article['from']}: {article['body'][:220]}")
+
+        return {"summary": " ".join(detail),
+                "dataframe": pd.DataFrame(rows),
+                "raw": {"ticket": row.to_dict(), "articles": articles,
+                        "tags": tags, "time_accounting": booked}}
+
     # ---------------- filters ----------------
     output = df
     applied = []
+
+    if tag_filter:
+        wanted = [t.strip() for t in str(tag_filter).split(",") if t.strip()]
+        matched = client.tickets_by_tags(wanted)
+        ids = {str(t.get("id")) for t in matched if t.get("id") is not None}
+        if "id" in output.columns:
+            output = output[output["id"].astype(str).isin(ids)]
+        applied.append(f"tags include {wanted}")
+
+        # Zammad's tag index is the authoritative count. Search returned 82 for a
+        # tag the index counts at 83, so both are reported rather than picking one
+        # and calling it the total.
+        if len(wanted) == 1:
+            indexed = next((t["tickets"] for t in tag_counts
+                            if t["tag"].lower() == wanted[0].lower()), None)
+            if indexed is not None and indexed != len(output):
+                summary += (f" NOTE: Zammad's tag index counts {indexed} ticket(s) "
+                            f"tagged '{wanted[0]}'; search returned {len(output)}. "
+                            f"Treat {indexed} as the total.")
+
+        # Search stops at a fixed ceiling however many rows are asked for, so a
+        # result sitting exactly on it is a floor, not a count.
+        if len(matched) >= ZammadClient.SEARCH_CAP:
+            total = None
+            if len(wanted) == 1:
+                total = next((t["tickets"] for t in tag_counts
+                              if t["tag"].lower() == wanted[0].lower()), None)
+            summary += (
+                f" IMPORTANT: Zammad's search returns at most "
+                f"{ZammadClient.SEARCH_CAP} tickets, and that ceiling was reached, "
+                f"so the filtered count below is a MINIMUM, not a total."
+                + (f" Zammad's tag index counts {total} ticket(s) with this tag."
+                   if total is not None else
+                   " No exact total is available for a multi-tag query."))
+
+    if overview:
+        queue = next((o for o in (queues or [])
+                      if str(o.get("name", "")).lower() == str(overview).strip().lower()), None)
+        if queue is None:
+            queue = next((o for o in (queues or [])
+                          if str(overview).strip().lower() in str(o.get("name", "")).lower()), None)
+        if queue is None:
+            available = ", ".join(repr(o.get("name")) for o in (queues or []))
+            return {"summary": f"No Zammad queue named '{overview}'. Available: {available}.",
+                    "dataframe": pd.DataFrame(), "raw": {"overviews": queues}}
+        ids = {str(i) for i in client.overview_ticket_ids(queue.get("link"))}
+        if "id" in output.columns:
+            output = output[output["id"].astype(str).isin(ids)]
+        applied.append(f"in queue '{queue.get('name')}'")
 
     if state_filter:
         wanted = [s.strip().lower() for s in state_filter.split(",") if s.strip()]
@@ -287,6 +451,20 @@ def query_zammad(
             summary += f" Matching tickets: {listing}."
 
     # ---------------- breakdown ----------------
+    if group_by and group_by.strip().lower() in ("tag", "tags"):
+        # Tags are not a ticket column, so this breakdown comes from Zammad's tag
+        # index. It is estate-wide by construction and cannot be combined with
+        # the filters above — saying so beats returning a number that looks
+        # filtered and is not.
+        rows = [{"tag": t["tag"], "tickets": t["tickets"]} for t in tag_counts]
+        table = pd.DataFrame(rows)
+        top = ", ".join(f"{r['tag']}: {r['tickets']}" for r in rows[:12])
+        summary += (f" BREAKDOWN BY TAG ({len(rows)} distinct tags, highest first): {top}.")
+        if applied:
+            summary += (" NOTE: this tag breakdown is estate-wide — tags live outside "
+                        "the ticket record, so it does not reflect the filters above.")
+        return {"summary": summary, "dataframe": table, "raw": {"tags": tag_counts}}
+
     if group_by:
         column = _GROUP_DIMENSIONS.get(group_by.strip().lower())
         if column and column in output.columns:
@@ -297,7 +475,7 @@ def query_zammad(
                         f"highest first): {top}.")
         else:
             summary += (f" Cannot group by '{group_by}'. Supported: "
-                        f"{sorted(set(_GROUP_DIMENSIONS))}.")
+                        f"{sorted(set(_GROUP_DIMENSIONS) | {'tag'})}.")
 
         return {"summary": summary, "dataframe": output, "raw": {"result": tickets}}
 

@@ -420,3 +420,76 @@ class ZammadClient:
             assets = data.get("assets", {}).get("Ticket", {})
             return list(assets.values())
         return []
+
+    # ---- families the docs list and the tool never used -------------------
+    # Probed against Zammad 6.5.2: SLAs (2), time accounting (32 entries across
+    # 16 tickets), overviews (12), tags (110). Ticket links, checklists,
+    # knowledge base and templates all came back empty, so nothing reads them.
+
+    # Zammad's ticket search returns at most this many rows whatever `limit`
+    # asks for — 200, 500, 1000 and 2000 all come back with 200. A caller that
+    # trusts the row count silently under-reports any tag with more tickets
+    # than this, so the cap is named and checked rather than discovered.
+    SEARCH_CAP = 200
+
+    def tickets_by_tags(self, tags: list, limit: int = SEARCH_CAP) -> list:
+        """Tickets carrying every tag given.
+
+        Tags are not on the ticket object, and asking per ticket would be one
+        request each across 3,800 tickets. Search resolves it server-side in
+        about a second, which is also the only filter here that does not need
+        the whole estate downloaded first.
+        """
+        clean = [str(t).strip() for t in tags if str(t).strip()]
+        if not clean:
+            return []
+        query = " AND ".join(f'tags:"{t}"' for t in clean)
+        return self.search(query, limit=limit)
+
+    def ticket_tags(self, ticket_id) -> list:
+        """Every tag on one ticket."""
+        try:
+            data = self.get("/api/v1/tags", {"object": "Ticket", "o_id": ticket_id})
+            return list((data or {}).get("tags") or [])
+        except Exception:
+            return []
+
+    def slas(self) -> list:
+        """SLA definitions — the targets themselves, not per-ticket attainment.
+
+        The ticket payload carries how far inside or past target each ticket
+        landed, but not what the target was. Without these an answer can say
+        "96% within SLA" and not what SLA.
+        """
+        try:
+            return self.get("/api/v1/slas") or []
+        except Exception:
+            return []
+
+    def time_accountings(self) -> list:
+        """Booked time entries. Each carries ticket_id and time_unit."""
+        try:
+            return self.get("/api/v1/time_accountings") or []
+        except Exception:
+            return []
+
+    def overviews(self) -> list:
+        """The named queues agents actually work from."""
+        try:
+            return [o for o in (self.get("/api/v1/overviews") or []) if o.get("active")]
+        except Exception:
+            return []
+
+    def overview_ticket_ids(self, link: str) -> list:
+        """Ticket ids in one overview, by its `link` slug.
+
+        Overview conditions are arbitrary Zammad expressions, so they are not
+        re-implemented here — the server is asked to evaluate its own view.
+        """
+        try:
+            data = self.get("/api/v1/ticket_overviews",
+                            {"view": link, "per_page": 200}) or {}
+            tickets = ((data.get("index") or {}).get("tickets")) or []
+            return [t.get("id") for t in tickets if t.get("id") is not None]
+        except Exception:
+            return []

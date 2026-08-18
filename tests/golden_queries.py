@@ -125,6 +125,17 @@ ZAMMAD_QUERIES = [
      "BREAKDOWN BY AGENT"),
     ("by organization", {"group_by": "organization"}, "BREAKDOWN BY ORGANIZATION"),
     ("estate statistics", {}, "Average first response time"),
+    # Families the tool never read until the 6.5.2 API was probed: the SLA
+    # definitions themselves, booked time, the named queues, the tag taxonomy,
+    # and one ticket's conversation.
+    ("sla targets", {}, "SLA policies configured"),
+    ("sla coverage is stated", {}, "of the estate"),
+    ("time booked", {}, "Time booked"),
+    ("named queues", {}, "Named queues (overviews) available"),
+    ("tag filter", {"tag_filter": "host: 192.168.1.73"}, "tags include"),
+    ("tag breakdown", {"group_by": "tag"}, "BREAKDOWN BY TAG"),
+    ("named queue filter", {"overview": "Escalated Tickets"}, "in queue 'Escalated Tickets'"),
+    ("ticket conversation", {"ticket_reference": "904298"}, "article(s)"),
 ]
 
 # Facts the unfiltered Zammad summary must always carry, because several
