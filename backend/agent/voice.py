@@ -45,6 +45,7 @@ _TOOL_SYSTEMS = {
     "query_zammad": "Zammad",
     "query_prometheus": "Prometheus",
     "query_opensearch": "OpenSearch",
+    "query_ceph": "Ceph",
     "correlate_problems_and_tickets": "Zabbix and Zammad",
     "lookup_ticket_context": "Zammad and Zabbix",
 }

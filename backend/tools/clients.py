@@ -493,3 +493,148 @@ class ZammadClient:
             return [t.get("id") for t in tickets if t.get("id") is not None]
         except Exception:
             return []
+
+
+# ---------------------------------------------------------------------------
+# Ceph
+# ---------------------------------------------------------------------------
+# The dashboard API is read-only from this app's point of view. It issues a
+# short-lived JWT and offers no long-lived API key, so exactly one non-GET call
+# exists in this client: the login. There is deliberately no create, update or
+# delete method anywhere below, so nothing in the app can reach one.
+_CEPH_TOKEN = {"value": None, "expires_at": 0.0}
+
+# Endpoint versions are per-path and not guessable — /api/monitor answers at 1.0
+# while /api/osd/settings wants 0.1, and asking with the wrong one returns 415,
+# which reads like a malformed request rather than a header mismatch. Probed
+# against Ceph 19.2.3 (squid).
+CEPH_API_VERSIONS = {
+    "/api/host": "1.3",
+    "/api/block/image": "2.0",
+    "/api/crush_rule": "2.0",
+    "/api/osd/settings": "0.1",
+}
+
+
+class CephClient:
+    """Read-only client for the Ceph mgr dashboard API."""
+
+    def __init__(self):
+        _ensure_config()
+        self.url = os.getenv("CEPH_URL", "").rstrip("/")
+        # The dashboard's browser URL carries a frontend fragment that the API
+        # layer never sees; strip it so a pasted address still works.
+        if "/#" in self.url:
+            self.url = self.url.split("/#")[0].rstrip("/")
+        self.user = os.getenv("CEPH_USER", "")
+        self.password = os.getenv("CEPH_PASS", "")
+        self.verify = str(os.getenv("CEPH_VERIFY_TLS", "false")).lower() in ("1", "true", "yes")
+        if not self.verify:
+            try:
+                import urllib3
+                urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+            except Exception:
+                pass
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.url and self.user and self.password)
+
+    def _token(self) -> Optional[str]:
+        """A valid JWT, logging in only when the cached one has expired.
+
+        The token lasts about eight hours. Renewing on expiry rather than per
+        call keeps the login count to roughly three a day.
+        """
+        now = time.time()
+        if _CEPH_TOKEN["value"] and now < _CEPH_TOKEN["expires_at"] - 60:
+            return _CEPH_TOKEN["value"]
+
+        response = requests.post(
+            f"{self.url}/api/auth",
+            json={"username": self.user, "password": self.password},
+            headers={"Accept": "application/vnd.ceph.api.v1.0+json",
+                     "Content-Type": "application/json"},
+            verify=self.verify, timeout=20)
+        if response.status_code not in (200, 201):
+            raise RuntimeError(
+                f"Ceph rejected the login ({response.status_code}). "
+                f"{str(response.text)[:150]}")
+
+        payload = response.json()
+        token = payload.get("token")
+        if not token:
+            raise RuntimeError("Ceph returned no token")
+
+        # Trust the token's own expiry rather than assuming a lifetime.
+        expires = now + 3600
+        try:
+            import base64 as _b64, json as _json
+            claim = token.split(".")[1]
+            body = _json.loads(_b64.urlsafe_b64decode(claim + "=" * (-len(claim) % 4)))
+            if body.get("exp"):
+                expires = float(body["exp"])
+        except Exception:
+            pass
+
+        _CEPH_TOKEN["value"] = token
+        _CEPH_TOKEN["expires_at"] = expires
+        return token
+
+    def get(self, path: str, params: Optional[dict] = None, version: Optional[str] = None):
+        """One GET. The only request method this client exposes."""
+        version = version or CEPH_API_VERSIONS.get(path.split("?")[0], "1.0")
+        response = requests.get(
+            f"{self.url}{path}",
+            params=params,
+            headers={"Accept": f"application/vnd.ceph.api.v{version}+json",
+                     "Authorization": f"Bearer {self._token()}"},
+            verify=self.verify, timeout=45)
+        if response.status_code == 415:
+            raise RuntimeError(
+                f"Ceph refused the API version for {path}. Versions are per-endpoint; "
+                f"tried v{version}.")
+        response.raise_for_status()
+        return response.json()
+
+    # ---- read helpers, each carrying the parameter its answer depends on ----
+
+    def health(self) -> dict:
+        return self.get("/api/health/full")
+
+    def summary(self) -> dict:
+        return self.get("/api/summary")
+
+    def pools(self) -> list:
+        """Pools WITH statistics.
+
+        Without stats=true every pool reports zero bytes, which reads as an
+        empty cluster rather than a missing parameter.
+        """
+        return self.get("/api/pool", params={"stats": "true"}) or []
+
+    def osds(self) -> list:
+        return self.get("/api/osd") or []
+
+    def hosts(self) -> list:
+        return self.get("/api/host") or []
+
+    def images(self) -> list:
+        """Every RBD image.
+
+        limit=-1 is mandatory. The default page returned 5 images out of 37 and
+        omitted the `volumes` pool entirely — the one holding the Cinder data —
+        so a caller trusting it would report that Cinder volumes do not exist.
+        """
+        return self.get("/api/block/image", params={"offset": 0, "limit": -1}) or []
+
+    def alerts(self) -> list:
+        data = self.get("/api/prometheus")
+        return data if isinstance(data, list) else []
+
+    def rgw_daemons(self) -> list:
+        """Empty when RGW is not deployed, which makes bucket/user calls 500."""
+        try:
+            return self.get("/api/rgw/daemon") or []
+        except Exception:
+            return []

@@ -190,3 +190,23 @@ HONESTY_EXPECTATIONS = [
     ({"metric": "routers"}, "NOT the physical"),
     ({"metric": "alerts"}, "alerting rule"),
 ]
+
+
+# --- Ceph: the storage cluster under OpenStack -----------------------------
+# Every figure here is computed in the tool. Three Ceph API behaviours make the
+# naive answer wrong: /api/pool reports zero bytes without stats=true,
+# /api/block/image pages silently (5 of 37 images, omitting the volumes pool),
+# and raw free space overstates usable capacity by the replication factor.
+CEPH_QUERIES = [
+    ("cluster health", {"query_type": "health"}, "Ceph cluster status"),
+    ("free space", {"query_type": "capacity"}, "usable free space is lower"),
+    ("pools in use", {"query_type": "pools"}, "pool(s) configured"),
+    ("backups are empty", {"query_type": "pools"}, "a snapshot is not a backup"),
+    ("osds", {"query_type": "osds"}, "OSD(s)"),
+    ("osds on one host", {"query_type": "osds", "host_filter": "server03"}, "on server03"),
+    ("hosts", {"query_type": "hosts"}, "host(s) in the Ceph cluster"),
+    ("rbd images", {"query_type": "images"}, "RBD image(s)"),
+    ("images in one pool", {"query_type": "images", "pool_filter": "volumes"},
+     "in pool 'volumes'"),
+    ("vm count is redirected", {"query_type": "images"}, "use query_prometheus"),
+]

@@ -24,13 +24,14 @@ LOOP_SUMMARY_CHARS = 1200
 PREVIEW_ROWS = 10
 
 ORCHESTRATOR_SYSTEM_PROMPT = """You are IQCore, an intelligent IT operations assistant.
-You have access to four systems, each covering DIFFERENT infrastructure:
+You have access to five systems, each covering DIFFERENT infrastructure:
 - Zabbix — network devices (routers, switches) and Windows hosts. Availability, SNMP, triggers.
 - Prometheus — the Linux server cluster (server01/02/03) and the services on it: MySQL,
   RabbitMQ, Elasticsearch, HAProxy, memcached, ProxySQL, containers, OpenStack, HTTP probes.
 - OpenSearch — LOG LINES from the OpenStack services (nova, neutron, keystone, glance,
   cinder, heat, rabbit, haproxy) running on server01/02/03.
 - Zammad — the IT helpdesk: tickets, agents, SLA, states.
+- Ceph — the STORAGE cluster under OpenStack: capacity, pools, OSDs, RBD images.
 
 ## RULE -1 — "logs" does NOT always mean OpenSearch
 OpenSearch holds OpenStack APPLICATION logs only. It contains nothing about network
@@ -48,6 +49,16 @@ Zabbix and Prometheus do not watch the same machines. Choose by what is being as
 If a question asks about "all servers" or "everything", check BOTH and say which came
 from which system. Never assume a host missing from one system does not exist — look in
 the other before concluding anything.
+
+## RULE 0b — Storage belongs to Ceph, not Prometheus
+Prometheus watches VM and host CPU, memory and disk USAGE. Ceph watches the storage
+layer itself. Choose by what is being asked about:
+- free space, capacity, pools, OSDs, replication, RBD images, Cinder volumes,
+  Glance images, storage health → query_ceph
+- VM CPU/memory, host load, scrape targets, how many VMs exist → query_prometheus
+"How many VMs" is NOT a Ceph question: Ceph only sees VMs whose disk is in its `vms`
+pool, and VMs on local hypervisor storage are invisible to it. Ceph answers "which
+VMs are Ceph-backed"; query_prometheus answers "how many VMs are there".
 
 ## RULE 1 — Cross-system questions use the correlation tool, not manual joining
 

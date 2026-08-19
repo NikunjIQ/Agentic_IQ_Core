@@ -2,6 +2,7 @@ from tools.zammad_tool import query_zammad
 from tools.zabbix_tool import query_zabbix
 from tools.prometheus_tool import query_prometheus
 from tools.opensearch_tool import query_opensearch
+from tools.ceph_tool import query_ceph
 from tools.correlation import correlate_problems_and_tickets, lookup_ticket_context
 
 LANGCHAIN_TOOLS = [
@@ -9,6 +10,7 @@ LANGCHAIN_TOOLS = [
     query_zabbix,
     query_prometheus,
     query_opensearch,
+    query_ceph,
     correlate_problems_and_tickets,
     lookup_ticket_context,
 ]
@@ -51,6 +53,12 @@ ROUTING_SUMMARIES = {
     "correlate_problems_and_tickets": (
         "Joins Zabbix problems to their Zammad tickets on an exact tag. Use for "
         "'is anyone working on this', or to find problems with no ticket raised."
+    ),
+    "query_ceph": (
+        "Ceph storage cluster. The disks UNDER OpenStack: capacity and free space, "
+        "pools (Cinder volumes, Glance images, Nova VM disks, backups), OSDs, RBD "
+        "images, cluster health and storage alerts. Prometheus watches VM CPU and "
+        "memory; Ceph watches the storage beneath them. Not a source of VM counts."
     ),
     "lookup_ticket_context": (
         "The reverse join: from a Zammad ticket id back to the device and the "

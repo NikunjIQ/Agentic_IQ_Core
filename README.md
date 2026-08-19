@@ -22,6 +22,7 @@ rather than returning a report.
 | **Prometheus** | Linux cluster `server01/02/03`, OpenStack, VMs, containers | 53 scrape targets |
 | **OpenSearch** | OpenStack application logs (`flog-*`) | ~5M docs/day, 60-day retention |
 | **Zammad** | Helpdesk tickets, agents, SLA | Tickets auto-created by Zabbix |
+| **Ceph** | Storage under OpenStack: pools, OSDs, RBD images | 19.2.3 squid; RGW not deployed |
 
 These do **not** overlap, and the distinction matters. Zabbix watches the network kit;
 Prometheus watches the Linux servers. OpenSearch holds OpenStack service logs and
@@ -77,6 +78,7 @@ rather than failing the request.
 | `query_zabbix` | hosts, host groups, items, problems, alerts, triggers, config audit, SLAs and service levels. Metrics cover CPU, memory, traffic, disk, uptime, OS/IOS version, agent version, hardware model/serial, ICMP latency and loss |
 | `query_prometheus` | CPU/memory/disk/load/uptime/network, scrape targets, VMs, OpenStack routers & networks, Cinder volumes, containers, raw PromQL, metric search |
 | `query_opensearch` | OpenStack logs by date, text, level, service, host, tenant; breakdowns |
+| `query_ceph` | storage cluster health, capacity (raw and usable), pools, OSDs, hosts, RBD images |
 | `query_zammad` | ticket counts, states, priorities, agents, organisations, SLA, tags, `group_by` |
 | `correlate_problems_and_tickets` | Zabbix problems joined to their Zammad tickets |
 | `lookup_ticket_context` | reverse: ticket -> device and originating problem |

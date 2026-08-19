@@ -62,6 +62,7 @@ def build(axis: str, question: str = "") -> str:
                 f"network devices in Zabbix{network} — routers, switches, Windows hosts",
                 f"the Linux servers in Prometheus{linux} — CPU, memory, disk, VMs",
                 "helpdesk tickets in Zammad",
+                "storage capacity and pools in Ceph",
                 ESCAPE_OPTION,
             ]))
 
@@ -87,13 +88,14 @@ def was_just_asked(conversation_history) -> bool:
 # "is everything ok") does not say enough to route on.
 _ANCHOR = re.compile(
     r"""(?ix)\b(
-        zabbix | prometheus | zammad | opensearch | grafana
+        zabbix | prometheus | zammad | opensearch | grafana | ceph
       | ticket s? | helpdesk | sla | agent s? | escalat \w*
       | log s? | error s? | openstack | nova | neutron | keystone | glance | cinder
       | rabbit \w* | mysql | haproxy | elastic \w* | container s? | exporter s?
       | host s? | device s? | router s? | switch \w* | server \w* | node s?
       | vm s? | virtual \s+ machine s? | instance s?
       | cpu | memory | ram | disk | storage | filesystem | traffic | bandwidth
+      | pool s? | osd s? | rbd | capacity | replicat \w* | snapshot s? | backup s?
       | interface s? | uptime | load | trigger s? | alert s? | problem s?
       | windows | linux | snmp | ping | port s?
     )\b

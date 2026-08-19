@@ -555,3 +555,64 @@ def test_zammad_ticket_conversation_is_reachable():
     assert "<div>" not in summary
     missing = query_zammad.invoke({"ticket_reference": "999999"})
     assert "No ticket found" in missing["summary"]
+
+
+def test_ceph_answers_every_expected_question():
+    from golden_queries import CEPH_QUERIES
+    from tools.ceph_tool import query_ceph
+    for label, args, must_contain in CEPH_QUERIES:
+        result = query_ceph.invoke(dict(args))
+        summary = str(result["summary"])
+        assert "error" not in summary[:20].lower(), f"{label}: {summary[:140]}"
+        assert must_contain in summary, f"{label}: expected {must_contain!r} in {summary[:180]!r}"
+
+
+def test_ceph_image_listing_is_not_silently_paginated():
+    """/api/block/image returns a short page by default.
+
+    The default gave 5 images of 37 and omitted the `volumes` pool entirely —
+    the one holding the Cinder data — so a caller trusting it would report that
+    Cinder volumes do not exist. The client passes limit=-1.
+    """
+    from tools.ceph_tool import query_ceph
+    result = query_ceph.invoke({"query_type": "images"})
+    pools = set(result["dataframe"]["pool"])
+    assert "volumes" in pools, f"the volumes pool is missing — pagination is back: {pools}"
+    assert len(result["dataframe"]) > 5, "only a first page of images was returned"
+
+
+def test_ceph_pool_stats_are_requested():
+    """/api/pool reports every pool at zero bytes without stats=true."""
+    from tools.ceph_tool import query_ceph
+    df = query_ceph.invoke({"query_type": "pools"})["dataframe"]
+    assert df["raw_used_GB"].sum() > 0, (
+        "every pool reports zero — stats=true is missing, and the cluster reads as empty")
+
+
+def test_ceph_reports_usable_not_just_raw_capacity():
+    """Raw free overstates what can be stored by the replication factor."""
+    from tools.ceph_tool import query_ceph
+    result = query_ceph.invoke({"query_type": "capacity"})
+    summary = result["summary"]
+    assert "raw free" in summary and "usable free space is lower" in summary, summary[:250]
+    usable = result["dataframe"]["usable_free_TB"].max()
+    raw = float(summary.split("TB raw free")[0].split(",")[-1].strip().split()[0])
+    assert usable < raw, f"usable ({usable}) should be below raw ({raw})"
+
+
+def test_ceph_does_not_answer_vm_counts():
+    """Ceph sees only VMs whose disk is in its pool; six of seven are invisible."""
+    from tools.ceph_tool import query_ceph
+    summary = query_ceph.invoke({"query_type": "images"})["summary"]
+    assert "use query_prometheus" in summary, summary[-300:]
+
+
+def test_ceph_health_ok_still_reports_firing_alerts():
+    """HEALTH_OK and a firing alert are two different truths."""
+    from tools.ceph_tool import query_ceph
+    result = query_ceph.invoke({"query_type": "health"})
+    summary = result["summary"]
+    assert "Ceph cluster status" in summary
+    if not result["dataframe"].empty and "HEALTH_OK" in summary:
+        assert "while these alerts are firing" in summary, (
+            "alerts are firing but the answer presents HEALTH_OK unqualified")
