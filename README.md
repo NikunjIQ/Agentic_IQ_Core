@@ -1,6 +1,6 @@
 # Agentic IQ Core — IT Operations Assistant
 
-A natural-language assistant over four IT systems. Ask a question in plain English;
+A natural-language assistant over five IT systems. Ask a question in plain English;
 it works out which system holds the answer, queries it, and replies like a colleague
 rather than returning a report.
 
@@ -9,6 +9,7 @@ rather than returning a report.
 "which VM has the highest CPU?"              -> Prometheus
 "how many tickets are open?"                 -> Zammad
 "show me logs for today"                     -> OpenSearch
+"how much storage is free?"                   -> Ceph
 "is anyone working on the disk space issue?" -> Zabbix + Zammad, joined
 ```
 
@@ -40,11 +41,11 @@ FastAPI (backend/main.py)
      |
 LangGraph:  classify -> [ clarify | simple_path | complex_path ] -> respond
                               |            |            |
-                              |            |            +-- orchestrator loop, up to 10 tool calls
+                              |            |            +-- orchestrator loop, up to 5 tool calls
                               |            +--------------- one tool, one call
                               +---------------------------- asks a question, no tools
                                            |
-                        6 tools -> Zabbix / Prometheus / OpenSearch / Zammad
+                7 tools -> Zabbix / Prometheus / OpenSearch / Zammad / Ceph
 ```
 
 **The design principle:** the LLM decides *what* to look up and writes the final
@@ -118,7 +119,7 @@ configured, so nothing there can raise a ticket.
 ### Requirements
 
 - Python 3.10+
-- Network reach to your Zabbix / Zammad / Prometheus / OpenSearch
+- Network reach to your Zabbix / Zammad / Prometheus / OpenSearch / Ceph
 - A Groq API key
 
 ### Install

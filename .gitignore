@@ -25,3 +25,8 @@ env/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Probe output — scratch, not source
+ceph_probe.json
+probe_*.json
+graph.png
