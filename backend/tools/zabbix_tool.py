@@ -26,7 +26,6 @@ __all__ = ["query_zabbix", "requested_metrics"]
 
 @tool
 def query_zabbix(
-    question: Optional[str] = None,
     query_type: Optional[str] = 'hosts',
     host_filter: Optional[str] = None,
     status_filter: Optional[str] = None,

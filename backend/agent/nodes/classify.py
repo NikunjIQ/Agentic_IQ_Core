@@ -18,6 +18,17 @@ Given a user's question, decide:
    more than one system? Examples: "are there tickets related to hosts that are down",
    "what's the status of host X and any related tickets"
 
+   DECISIVE TEST for complexity: does answering require facts from TWO systems?
+   A question that names a subject belonging to one system AND asks about tickets,
+   or about anything held by a different system, is COMPLEX — even when it sounds
+   like one short question. Naming a subject from another system is not a filter
+   that one tool can apply.
+   COMPLEX: "is there a ticket for the ceph network alert" (Ceph + Zammad),
+            "is anyone working on the disk space problem" (Zabbix + Zammad),
+            "which VM is slow and is it logging errors" (Prometheus + OpenSearch).
+   SIMPLE:  "how many tickets are open" (Zammad alone),
+            "is ceph healthy" (Ceph alone).
+
 Available tools:
 {tool_descriptions}
 

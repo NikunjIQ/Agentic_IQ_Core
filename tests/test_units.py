@@ -767,3 +767,33 @@ def test_node_events_are_silent_when_not_streaming():
     with streaming.node("classify"):
         pass          # must not raise without an emitter
     streaming.tool_started("query_zabbix")
+
+
+def test_no_tool_accepts_an_inert_question_parameter():
+    """Every query tool used to accept `question` and no tool body read it.
+
+    That is worse than dead code. Asked "is there a ticket for the ceph network
+    alert", the extractor put 'ceph network alert' into `question`, where it was
+    silently discarded — so the call filtered by state alone while looking
+    scoped, and the answer married the estate's open-ticket count to a subject
+    it had never filtered on.
+    """
+    from agent.tool_schemas import TOOL_SCHEMAS
+    offenders = [t["function"]["name"] for t in TOOL_SCHEMAS
+                 if "question" in (t["function"].get("parameters") or {}).get("properties", {})]
+    assert not offenders, f"these tools accept an unread `question`: {offenders}"
+
+
+def test_classifier_carries_the_cross_system_test():
+    """A question spanning two systems must not be classified simple.
+
+    "is there a ticket open for the ceph network alert" was routed to
+    query_zammad alone, so Ceph was never consulted and the answer was
+    confidently wrong.
+    """
+    from agent.nodes.classify import CLASSIFY_PROMPT
+    assert "DECISIVE TEST for complexity" in CLASSIFY_PROMPT
+    assert "TWO systems" in CLASSIFY_PROMPT
+    assert "ceph network alert" in CLASSIFY_PROMPT, (
+        "the worked cross-system example is gone; it is what stops the small "
+        "model reading a two-system question as one short question")

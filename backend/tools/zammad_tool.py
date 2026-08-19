@@ -92,7 +92,7 @@ def _match_any(series: pd.Series, needle: str) -> pd.Series:
 
 @tool
 def query_zammad(
-    question: Optional[str] = None,
+    search: Optional[str] = None,
     state_filter: Optional[str] = None,
     date_filter: Optional[str] = None,
     date_field: Optional[str] = None,
@@ -137,6 +137,15 @@ def query_zammad(
       rather than a state.
     - ticket_reference: a ticket number or id. Returns that ticket's conversation
       (articles) and any time booked against it.
+    - search: free text to find in ticket titles and bodies, e.g. 'ceph', 'disk full',
+      'BGP'. Use this whenever the question asks whether a ticket EXISTS about some
+      subject. Without it the other filters narrow by state or date only and the
+      answer would describe unrelated tickets.
+
+    WHERE TICKETS COME FROM: only Zabbix raises tickets automatically, via a webhook.
+    Prometheus has no alerting rules and Ceph has no ticket integration, so an alert
+    from either of those creates NO ticket. Finding nothing for a Ceph or Prometheus
+    alert means no integration exists, not that the alert was handled.
     """
     client = ZammadClient()
     tickets = client.all_tickets()
@@ -364,6 +373,28 @@ def query_zammad(
     # ---------------- filters ----------------
     output = df
     applied = []
+
+    if search:
+        # Free text is resolved server-side. Without this the tool could only
+        # narrow by state or date, so "is there a ticket about X" was answered
+        # with a count of tickets that had nothing to do with X.
+        matched = client.search(str(search), limit=ZammadClient.SEARCH_CAP)
+        ids = {str(t.get("id")) for t in matched if t.get("id") is not None}
+        if "id" in output.columns:
+            output = output[output["id"].astype(str).isin(ids)]
+        applied.append(f"text ~ '{search}'")
+        if len(matched) >= ZammadClient.SEARCH_CAP:
+            summary += (f" IMPORTANT: Zammad's search returns at most "
+                        f"{ZammadClient.SEARCH_CAP} tickets and that ceiling was "
+                        f"reached, so the count below is a MINIMUM.")
+        elif not ids:
+            # An empty text search is a real finding, and the reason matters:
+            # nothing in this helpdesk is created by Ceph or Prometheus.
+            summary += (f" NOTE: no ticket mentions '{search}'. Tickets here are raised "
+                        f"automatically only by Zabbix; Prometheus and Ceph have no "
+                        f"ticket integration, so an alert from those systems would "
+                        f"never create one. This is a genuine absence, not a gap in "
+                        f"the search.")
 
     if tag_filter:
         wanted = [t.strip() for t in str(tag_filter).split(",") if t.strip()]

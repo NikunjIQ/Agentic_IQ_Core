@@ -106,7 +106,6 @@ def _build_query(search, time_range, levels, service, host_filter, tenant, exclu
 
 @tool
 def query_opensearch(
-    question: Optional[str] = None,
     search: Optional[str] = None,
     date_filter: Optional[str] = None,
     log_level: Optional[str] = None,

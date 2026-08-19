@@ -218,7 +218,6 @@ def _rows(series: list, unit: str, node_map: dict) -> list:
 
 @tool
 def query_prometheus(
-    question: Optional[str] = None,
     metric: Optional[str] = None,
     promql: Optional[str] = None,
     host_filter: Optional[str] = None,

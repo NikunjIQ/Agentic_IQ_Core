@@ -35,7 +35,10 @@ def _simple_path_node_impl(state: AgentState) -> AgentState:
 
     # Extract dynamic arguments using the fast model
     tool_schema = next((t for t in TOOL_SCHEMAS if t.get("function", {}).get("name") == tool_name), None)
-    tool_args = {"question": state["question"]}
+    # No default arguments. Passing the raw question used to look like scope
+    # while being read by nothing, so a call with no extracted arguments must
+    # be visibly empty rather than plausibly filled.
+    tool_args = {}
     
     if tool_schema:
         live_schema = fetch_live_metadata()

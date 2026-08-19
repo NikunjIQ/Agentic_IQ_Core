@@ -71,7 +71,6 @@ def _health_summary(client) -> tuple:
 
 @tool
 def query_ceph(
-    question: Optional[str] = None,
     query_type: Optional[str] = "health",
     pool_filter: Optional[str] = None,
     host_filter: Optional[str] = None,

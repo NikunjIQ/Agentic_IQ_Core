@@ -616,3 +616,34 @@ def test_ceph_health_ok_still_reports_firing_alerts():
     if not result["dataframe"].empty and "HEALTH_OK" in summary:
         assert "while these alerts are firing" in summary, (
             "alerts are firing but the answer presents HEALTH_OK unqualified")
+
+
+def test_zammad_text_search_finds_a_real_term():
+    """Without free text, "is there a ticket about X" could not be answered."""
+    from tools.zammad_tool import query_zammad
+    result = query_zammad.invoke({"search": "Zabbix agent"})
+    assert "text ~ 'Zabbix agent'" in result["summary"], result["summary"][-300:]
+    assert not result["dataframe"].empty
+
+
+def test_zammad_absent_subject_says_why_it_is_absent():
+    """No ticket mentions ceph, and the reason matters.
+
+    Only Zabbix raises tickets automatically. Ceph and Prometheus have no ticket
+    integration, so nothing from them could ever appear — a genuine absence, not
+    a gap in the search.
+    """
+    from tools.zammad_tool import query_zammad
+    result = query_zammad.invoke({"search": "ceph"})
+    summary = result["summary"]
+    assert "0 ticket(s) match [text ~ 'ceph']" in summary, summary[-300:]
+    assert "no ticket mentions" in summary
+    assert "Zabbix" in summary and "no ticket integration" in summary
+
+
+def test_zammad_text_search_cap_is_reported():
+    """Search stops at 200 rows whatever limit asks for."""
+    from tools.zammad_tool import query_zammad
+    summary = query_zammad.invoke({"search": "interface"})["summary"]
+    if "200 ticket(s) match" in summary:
+        assert "MINIMUM" in summary, "a capped count is being presented as a total"
