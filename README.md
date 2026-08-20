@@ -9,7 +9,7 @@ rather than returning a report.
 "which VM has the highest CPU?"              -> Prometheus
 "how many tickets are open?"                 -> Zammad
 "show me logs for today"                     -> OpenSearch
-"how much storage is free?"                   -> Ceph
+"how much storage is free?"                  -> Ceph
 "is anyone working on the disk space issue?" -> Zabbix + Zammad, joined
 ```
 
@@ -79,8 +79,8 @@ rather than failing the request.
 | `query_zabbix` | hosts, host groups, items, problems, alerts, triggers, config audit, SLAs and service levels. Metrics cover CPU, memory, traffic, disk, uptime, OS/IOS version, agent version, hardware model/serial, ICMP latency and loss |
 | `query_prometheus` | CPU/memory/disk/load/uptime/network, scrape targets, VMs, OpenStack routers & networks, Cinder volumes, containers, raw PromQL, metric search |
 | `query_opensearch` | OpenStack logs by date, text, level, service, host, tenant; breakdowns |
-| `query_ceph` | storage cluster health, capacity (raw and usable), pools, OSDs, hosts, RBD images |
-| `query_zammad` | ticket counts, states, priorities, agents, organisations, SLA, tags, `group_by` |
+| `query_ceph` | health, capacity (raw **and** usable after replication), pools, OSDs (incl. HDD/SSD), hosts, RBD images, snapshots, CephFS/MDS, CRUSH rules and hierarchy, cluster logs, monitoring endpoints |
+| `query_zammad` | ticket counts, states, priorities, agents, organisations, SLA targets and attainment, tags, free-text search, named queues, booked time, one ticket's conversation, `group_by` |
 | `correlate_problems_and_tickets` | Zabbix problems joined to their Zammad tickets |
 | `lookup_ticket_context` | reverse: ticket -> device and originating problem |
 
@@ -201,15 +201,16 @@ answer is written.
 python tests/run_evals.py
 ```
 
-~98 checks in about 90 seconds. No pytest needed; works under pytest unchanged.
+137 checks in about 6 minutes. No pytest needed; works under pytest unchanged.
 
 ```bash
-python tests/run_evals.py --offline    # no network, ~4s
+python tests/run_evals.py --offline    # no network, ~13s
 python tests/run_evals.py --llm        # includes extraction evals (spends tokens)
 ```
 
 Three tiers: offline wiring and unit checks, live tool checks against the real systems,
-and opt-in NL→argument extraction evals. The consistency checks encode bugs that
+and opt-in NL→argument extraction evals (paced at 8s per case via `IQCORE_EVAL_PACING`,
+because the models are capped per minute). The consistency checks encode bugs that
 actually shipped — a docstring edit once changed an answer from 22 to 3,784 with no
 error, and only an eval catches that.
 
@@ -217,13 +218,25 @@ error, and only an eval catches that.
 
 ## Known constraints
 
-**Groq free tier is the binding limit.** ~100k tokens/day. A complex question costs
-roughly 13k, so about 7–11 per day. Test the connection through the sidebar — it uses
-Groq's models endpoint and spends nothing.
+**Groq's per-minute cap is the binding limit.** The gpt-oss models allow **8,000
+tokens/minute**. A simple question costs ~1,528 (19% of a minute); a complex one with
+4 tool calls costs ~20,836 (2.6 minutes), so a few in quick succession will 429. Test
+the connection through the sidebar — it uses Groq's models endpoint and spends nothing.
+
+**Providers retire models.** Both original models were decommissioned mid-project and
+began 404-ing mid-answer. Ids live in `backend/agent/models.py`, are overridable by
+environment variable, and the connection test checks the ids the app will actually
+call — so the next retirement shows up in the sidebar rather than in an answer.
 
 **Zammad fetching is inefficient.** `query_zammad` downloads the whole ticket estate
-(3,788 tickets, 38 pages) before filtering. Cached 60s, but a cold answer takes ~43s.
-Zammad offers no count-only search, so this needs redesign rather than a flag.
+(~3,825 tickets) before filtering. Cached 60s, but a cold answer takes ~43s. Zammad
+offers no count-only search. `tag_filter` and `search` are resolved server-side and
+skip the download; the other filters do not.
+
+**Silent truncation is the recurring hazard.** Zammad's search returns at most 200
+rows whatever `limit` asks; Ceph's image listing returned 5 of 37 by default; Zabbix
+item searches match template items that never hold a value. Each is handled in code
+and stated in the answer, but assume the next API does it too.
 
 **No authentication on the API.** Anyone who can reach port 8000 can query it and change
 its configuration.
@@ -232,4 +245,10 @@ its configuration.
 
 **Dependencies are unpinned.**
 
-See `HANDOVER.md` for the full picture including infrastructure gaps and planned work.
+**Ceph authentication is the one non-GET call in the app.** The dashboard issues a
+short-lived token and offers no long-lived API key, so `CephClient` performs exactly
+one POST — the login — and caches the token until it expires. There are no create,
+update or delete methods anywhere in that client.
+
+See `HANDOVER.md` for the full picture: infrastructure findings, every bug worth
+knowing, and what to build next.

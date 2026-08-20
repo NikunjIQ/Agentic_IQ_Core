@@ -5,18 +5,20 @@ built, why it is built that way, what is wrong with it, and what was planned nex
 
 Repo: `https://github.com/NikunjIQ/Agentic_IQ_Core` (private)
 Local: `C:\Users\NikunjSinha(Identiqa\Desktop\Agentic_IQ_Core`
-Scale: ~5,000 lines, 40 files.
+Scale: ~9,200 lines of Python, 61 tracked files.
+Tests: 137 checks (`python tests/run_evals.py`), all passing.
 
 ---
 
 ## 1. What it is
 
-A natural-language assistant over four IT systems, used by an operations team. You ask
+A natural-language assistant over five IT systems, used by an operations team. You ask
 in plain English; it routes to the right system, queries it, and answers conversationally.
 
-Built for Identiqa Labs. The four systems watch **different, non-overlapping**
+Built for Identiqa Labs. The five systems watch **different, non-overlapping**
 infrastructure — this is the single most important fact about the app, and blurring it
-is the most common way to break it.
+is the most common way to break it. Every confidently-wrong answer this project has
+produced came from one system's number being attached to another system's question.
 
 | System | Watches | Address |
 |---|---|---|
@@ -31,16 +33,30 @@ is the most common way to break it.
 ## 2. Architecture
 
 ```
-Streamlit frontend  ->  FastAPI backend  ->  LangGraph  ->  6 tools  ->  4 systems
+Streamlit frontend  ->  FastAPI backend  ->  LangGraph  ->  7 tools  ->  5 systems
 ```
 
 **LangGraph flow:** `classify` → (`clarify` | `simple_path` | `complex_path`) → `respond`
 
-- **classify** — one 8B call. Returns complexity, chosen tool, and an ambiguity axis.
+- **classify** — one small-model call. Returns complexity, chosen tool, and an
+  ambiguity axis. Sees one-line routing summaries, not the full tool docstrings.
 - **clarify** — asks the user a question. No model call, no tools; free.
-- **simple_path** — extract args (8B) → run one tool → write the answer (70B).
-- **complex_path** — orchestrator loop, up to 10 tool calls, then answers.
+- **simple_path** — extract args (small, schema forced by `tool_choice`) → run one
+  tool → write the answer (large).
+- **complex_path** — orchestrator loop, up to 5 tool calls, then answers.
 - **respond** — currently a pass-through placeholder.
+
+**Models (Groq):** `openai/gpt-oss-20b` classifies and extracts, `openai/gpt-oss-120b`
+reasons and writes. Both ids live in `backend/agent/models.py` and are overridable
+with `IQCORE_REASONING_MODEL` / `IQCORE_FAST_MODEL`. The previous pair
+(`llama-3.3-70b-versatile`, `llama-3.1-8b-instant`) was **retired by Groq mid-project**
+and started 404-ing mid-answer — assume it will happen again.
+
+**How a path is chosen.** The criterion is: can exactly ONE call to ONE tool answer
+this? A question needing facts from two systems is complex even when it is one short
+sentence. Unparseable classifier output fails safe to `complex`. `clarify_axis`
+outranks complexity in `route_by_complexity`, so a question naming nothing routable
+gets a question back regardless of what the model decided.
 
 ### The governing principle
 
@@ -65,7 +81,10 @@ example verbatim as a value.
 | `backend/agent/nodes/*.py` | classify, simple_path, complex_path, clarify_node, respond |
 | `backend/agent/tool_registry.py` | The one place tools are registered |
 | `backend/tools/clients.py` | Shared API clients for all four systems |
-| `backend/tools/*_tool.py` | The four query tools |
+| `backend/tools/*_tool.py` | The five query tools (zabbix, zammad, prometheus, opensearch, ceph) |
+| `backend/agent/models.py` | The two Groq model ids, in one place |
+| `frontend/live_graph.py` | Draws the graph as it executes |
+| `frontend/ceph_treemap.py` | Draws the CRUSH hierarchy as a treemap |
 | `backend/tools/zabbix/` | Zabbix branch implementations — client, common, metrics, hosts, items, monitoring, sla, audit. One tool, split by kind of question |
 | `backend/tools/correlation.py` | Zabbix↔Zammad join |
 | `backend/agent/config_store.py` | Credentials saved through the UI |
@@ -75,7 +94,7 @@ example verbatim as a value.
 | `backend/agent/voice.py` | Answer style |
 | `backend/agent/suggestions.py` | Deterministic follow-up chips |
 | `backend/agent/streaming.py` | SSE status + token streaming |
-| `tests/run_evals.py` | Standalone eval harness (~98 checks) |
+| `tests/run_evals.py` | Standalone eval harness (137 checks) |
 
 ---
 
@@ -231,6 +250,32 @@ Empty, so not worth building for: `maintenance`, `correlation`, `userdirectory`,
 Prometheus and the correlation engine were added in the earlier commits alongside the
 Zabbix/Zammad work.
 
+### This session (most recent last)
+
+| Commit | Work |
+|---|---|
+| `2ec0d5b` | Zabbix widened beyond its original 24 sample questions: metric vocabulary 4 → 9 families, new SLA branch, module split into `tools/zabbix/` |
+| `8292e6f` | Zabbix username/password auth fixed for 6.4+ (was broken twice over, invisibly) |
+| `3d8dec2` | Metric questions about a CLASS of device (`group_filter` on `items`) |
+| `e73cebf` | Groq retired both models; replaced with the gpt-oss pair, ids centralised |
+| `0a04e72` | Token cut: routing summaries for classify, leaner schemas, `MAX_TOOL_CALLS` 10 → 5 |
+| `d846153` | Zammad widened using the 6.5.2 API: tag filtering, text search, SLA definitions, time accounting, named queues, ticket conversation |
+| `eff6d01` | Live graph — watch nodes execute in the frontend while a question runs |
+| `369b96f` | **Ceph added as a fifth system** |
+| `c90d22a` | Removed 726 KB of probe output committed by mistake |
+| `9ba5a1c` | Fixed a confidently wrong cross-system answer (see §6) |
+| `eb44481` | The 19 official Ceph questions, all answerable |
+| `b1ad5a2` | CRUSH treemap in the frontend; settings boundary recorded |
+| `7954bca` | Ceph added to the credential sidebar, with a connection test |
+
+**The method that produced all of it**, and the one to keep using: read the API
+reference for the *running version* to get the candidate surface, then **probe the live
+system** to find what is actually populated, and build only for the overlap. The docs
+and reality disagreed on the highest-value item every single time. Zabbix inventory was
+switched off; Ceph's RGW was not deployed; Zammad's ticket links were unused. Building
+from documentation alone would have produced correct, well-tested functions that return
+nothing.
+
 ---
 
 ## 6. Bugs found and fixed — worth knowing, they show the failure modes
@@ -271,6 +316,53 @@ default only covers a missing key. A fresh clone crashed before rendering.
 **Malformed tool calls killed whole requests.** Groq rejects them with
 `tool_use_failed`; the orchestrator had no error handling around its LLM call.
 
+### Found this session
+
+**A dead parameter swallowed the question's subject.** Every query tool accepted a
+`question` argument and **no tool body read it** — output was byte-identical with and
+without. Asked *"is there a ticket open for the ceph network alert?"*, the extractor put
+`'ceph network alert'` into `question`, where it vanished; the tool filtered by state
+alone, and the answer married the estate's open-ticket count (22) to a subject it had
+never filtered on. Removed from all five tools. **The lesson: an unread parameter is
+worse than no parameter, because it makes a call look scoped when it is not.**
+
+**Cross-system questions classified as simple.** The classifier's complex examples were
+all long sentences, so a short two-system question read as one-system. It now carries a
+decisive test — *does answering require facts from TWO systems?* — with worked examples.
+
+**Zabbix username/password auth was broken twice over, invisibly.** `user.login`'s
+`user` parameter became `username` in 6.0 and was removed in 6.4; 6.4 also dropped the
+request-body `auth` field in favour of the `Authorization` header. Both were wrong. It
+was never noticed because the app authenticates with a token, so the fallback was dead
+code. Anyone configuring username/password through the sidebar would have hit it.
+
+**Zabbix `sla.getsli` returns `sli = -1` for periods before the SLA's effective date.**
+A sentinel, not a percentage. Compared against the 90% target it reported a service with
+zero downtime as breaching in 2 of 7 periods.
+
+**Metric questions about a class of device were unanswerable.** `items` required a
+single `host_filter`, so *"what is the uptime of the routers"* routed to
+`query_type='hosts'` — which reports up/down and **cannot report a metric at all** — and
+answered "2 routers, both up, go and check their uptime in Zabbix". `group_filter` now
+works on `items`, and a `host_filter` that matches no host falls back to a group lookup.
+
+**Zammad's search caps at 200 rows** whatever `limit` asks for — 200, 500, 1000 and 2000
+all return 200. A tag with more tickets read as exactly 200. Now reported as a MINIMUM
+with the authoritative count from the tag index beside it.
+
+**Ceph's `/api/block/image` pages silently** — 5 images of 37, omitting the whole
+`volumes` pool holding 543 GB of Cinder data. **`/api/pool` reports every pool at zero
+bytes without `stats=true`.** Both would have produced confident, wrong answers.
+
+**Compressing tool descriptions broke extraction.** Shortening the Prometheus metric
+shortcut list stopped `'networks'` and `'vms'` being recognised: those descriptions are
+**matching hooks for the model, not documentation**. The prose around them is
+compressible; the enumerations are not. Only the `--llm` eval tier caught it.
+
+**`clarify.py` did not know the word "ceph"** or any storage vocabulary, so *"is ceph
+healthy?"* was treated as too vague to route and answered with a clarifying question
+that did not even list Ceph.
+
 ---
 
 ## 7. Pros
@@ -290,113 +382,182 @@ default only covers a missing key. A fresh clone crashed before rendering.
 
 ## 8. Cons
 
-- **Token budget is the binding constraint.** ~100k/day on Groq free tier; a complex
-  question costs ~13k. Roughly 7–11 complex questions a day.
-- **Zammad fetching is wasteful.** Downloads 3,788 tickets to count 22 (~43s cold).
-  Zammad offers no count-only search and has no Elasticsearch backing it, so this needs
-  redesign.
+- **Tokens are capped PER MINUTE now, not per day.** The gpt-oss models allow
+  **8,000 tokens/minute**. A simple question costs ~1,528 (19% of a minute); a complex
+  one with 4 tool calls costs ~20,836 (2.6 minutes). Three questions in quick succession
+  will 429. This is a different constraint from the old daily budget and bites during
+  demos rather than at the end of the day.
+- **Complex questions are still expensive.** 76% of each orchestrator iteration is tool
+  schemas, resent every loop. Trimming got them from 3,804 to ~2,900 tokens; going
+  further needs schema subsetting, which is designed but not built (see §9).
+- **Zammad still downloads the whole estate** (3,825 tickets, ~43s cold) for most
+  questions. `tag_filter` and `search` are now resolved server-side and skip it, but the
+  other filters do not.
 - **No authentication anywhere.** `/chat` and `/config` are open to anyone who can reach
   the port — including the ability to overwrite credentials.
 - **No logging at all.** No `import logging` in the codebase.
 - **Credentials stored in cleartext** in `credentials.json` (gitignored, permissions
   best-effort).
-- **`raw` payloads ship whole datasets to the browser** — every Zammad answer sends all
-  3,788 tickets for a debug panel.
-- **Hardcoded infrastructure IPs** as `os.getenv` fallbacks in six files, which turns
-  missing config into a silent wrong-host connection.
+- **`raw` payloads ship whole datasets to the browser.**
+- **Hardcoded infrastructure IPs** as `os.getenv` fallbacks, which turns missing config
+  into a silent wrong-host connection.
 - **Dependencies unpinned**; no Docker, no deployment config.
-- **`prometheus_tool.py` is 600 lines** doing two jobs (host metrics and OpenStack/VMs).
+- **Two tools are getting large**: `prometheus_tool.py` at 589 lines doing two jobs
+  (host metrics and OpenStack/VMs), and `ceph_tool.py` at 568 lines with 12 query types.
+  `zabbix_tool.py` hit 1,001 before it became `tools/zabbix/`; these are next.
 - **Dead code**: `backend/models/schemas.py` is never imported; `ChatResponse` is defined
-  twice and used nowhere; five client methods have no call sites; the `question`
-  parameter on all four query tools is accepted and never read.
+  twice and used nowhere; several client methods have no call sites. (The `question`
+  parameter is now gone — see §6.)
+- **Ceph auth is the one non-GET in the app.** The dashboard issues a short-lived JWT and
+  offers no long-lived API key, so `CephClient` performs exactly one POST — the login —
+  caching the token until its own `exp`. There are deliberately no create/update/delete
+  methods anywhere in that client.
 - **Eval suite hits live systems**, so it needs the real environment.
 
 ---
 
-## 9. Planned work, discussed but not built
+## 9. Planned work
 
-### Immediate
+Ordered so a fresh session can pick one up without re-deriving the context.
 
-1. **Zammad server-side filtering.** Stop downloading the estate for questions the
-   summary already answers; use search for row queries. Measure DB-backed search first —
-   there is no Elasticsearch behind it.
-2. **Cleanup pass.** Delete the dead code above; add logging; pin dependencies; add
-   auth to the API; remove hardcoded IP fallbacks; cap `raw`.
-3. **Make the table match the number.** An answer saying "22 open tickets" can currently
-   attach a table of 2 rows, because the figure comes from the estate summary and the
-   table from the filter. Label tables with what they contain and check row counts
-   against stated figures.
+### Ready to build — the design is settled
 
-### Correlation
+1. **The three-way VM join: Ceph ↔ Prometheus ↔ OpenSearch.** *Probed and confirmed, not
+   built.* OpenStack names Ceph RBD images after the instance UUID
+   (`vms/<uuid>_disk`), Prometheus carries the same UUID as `instance_id` on
+   `libvirt_domain_openstack_info`, and nova writes `[instance: <uuid>]` into its logs.
+   One identifier, three systems — the same class of key as the Zabbix↔Zammad tag.
+   `query_ceph` already returns `openstack_uuid` on every image row.
+   **Two things make or break it.** Search the logs for `"instance: <uuid>"`, NOT the
+   bare UUID: the bare form matches ~569,000 routine polling lines per VM (one neutron
+   request lists every VM at once), while the structured marker gives 20–965 — a 4,800×
+   noise reduction. And default to warning/error, which cuts those to 4–953. Get either
+   wrong and it returns half a million rows of nothing that a model will summarise as
+   "high activity".
+   Worth knowing: only 1 of 7 VMs (`jammy`) is Ceph-backed; the rest are on local disk.
 
-4. **Zabbix ↔ Prometheus.** Join by IP: Zabbix host IPs against OpenStack floating and
-   public-network IPs. Confirmed possible — "Nikunj VM" at `192.168.1.152` is a floating
-   IP in the cluster. Would answer "is this VM slow, or is its hypervisor overloaded?".
-   Blocker: the exporter does not expose which VM owns which floating IP; needs the
-   OpenStack API directly, or MAC-based matching via Zabbix inventory.
-5. **Zammad tags as a correlation dimension.** Tags already classify tickets
-   (`component: storage` 80, `component: cpu` 83) and there are `host: <ip>` tags giving
-   an exact device→ticket key better than body parsing. Tag search works. Adding
-   `tag_filter` and `group_by: tag` would answer "tickets for storage/routers/OpenStack"
-   generically.
+2. **Schema subsetting in the orchestrator** — item 5 of the token work, deliberately
+   deferred. Measured options: *progressive detail* (iteration 1 binds everything, later
+   iterations keep full schemas only for tools already used and drop the rest to
+   name + one-liner + parameter names) gives ~25%, rising to ~30% with a modest trim of
+   the 950-token system prompt. Nothing becomes uncallable, which hard subsetting risks.
+   **Measure first**: instrument the loop to record iterations per question — the "4 tool
+   calls" figure everything is costed against has never been verified.
+
+3. **Split the two large tools.** `prometheus_tool.py` (589 lines, two jobs) and
+   `ceph_tool.py` (568 lines, 12 query types) into packages, exactly as `zabbix_tool.py`
+   became `tools/zabbix/`. Tool surface unchanged, so the free evals fully verify it.
+
+4. **Cross-system cases in the `--llm` tier.** The confidently-wrong Ceph/Zammad answer
+   was found by the user, not by a test. The classification fix is only proven on that
+   one question.
+
+### Blocked or impossible
+
+5. **Zabbix ↔ Prometheus by IP.** Confirmed possible in principle — "Nikunj VM"
+   (`192.168.1.152`) is an OpenStack floating IP. Blocker: the exporter does not expose
+   which VM owns which floating IP; needs the OpenStack API directly or MAC matching.
 6. **Prometheus ↔ Zammad** is impossible until Prometheus has alerting rules and an
-   Alertmanager receiver pointing at Zammad.
+   Alertmanager receiver pointing at Zammad. Neither exists.
+7. **Ceph ↔ Zammad** has no join key at all. Only Zabbix raises tickets, via webhook.
+   `query_zammad` now says so when a text search for a Ceph or Prometheus alert finds
+   nothing — that absence is a genuine finding, not a search failure.
 
-### Security
+### Housekeeping, unchanged and still true
 
-7. **Guardrails discussed, not built:** an output scrubber redacting secret values and
-   patterns from everything leaving the backend; deterministic refusal of credential
-   probes; separating tool data from instructions to resist injection via ticket titles
-   and log lines; sanitising exception text. Items 1, 2 and 4 there are deterministic and
-   free.
+8. **Cleanup pass.** Delete the remaining dead code; add logging; pin dependencies; add
+   auth to the API; remove hardcoded IP fallbacks; cap `raw`.
+9. **Make the table match the number.** An answer saying "22 open tickets" can attach a
+   2-row table, because the figure comes from the estate summary and the table from the
+   filter.
+10. **Security guardrails discussed, not built:** an output scrubber; deterministic
+    refusal of credential probes; separating tool data from instructions to resist
+    injection via ticket titles and log lines; sanitising exception text.
 
 ### Larger ideas
 
-8. **Unified entity resolution** across all four systems — one resolver instead of three
-   separate identity maps.
-9. **A canonical record shape** so correlation generalises to any pivot (entity, time,
-   person, group) rather than pairwise joins.
-10. **Provenance in the answer**, not just the debug panel.
-11. **Trend awareness** — `PrometheusClient.over_time()` exists and is unused.
-12. **Feedback capture** (thumbs up/down) to grow the eval set.
-
-### Explicitly out of scope in the last brief
-
-Question catalogue and tiered routing; token-reduction work; charts, forecasting,
-anomaly detection, daily digests; any write or remediation capability.
+11. **Unified entity resolution** across all five systems — one resolver instead of
+    several identity maps. `correlation.resolve_device` is the closest thing and is
+    already reused by the Zabbix SLA branch.
+12. **A canonical record shape** so correlation generalises to any pivot rather than
+    pairwise joins.
+13. **Provenance in the answer**, not just the debug panel.
+14. **Trend awareness** — `PrometheusClient.over_time()` exists and is unused; Ceph and
+    Zabbix both hold trend data (323k Zabbix trend rows).
+15. **Feedback capture** (thumbs up/down) to grow the eval set.
 
 ---
 
 ## 10. Operational notes
 
 **Credentials.** `.env` and `credentials.json` are both read; saved config wins. Neither
-is in git. At handover, `.env` held Prometheus and OpenSearch while Zabbix, Zammad and
-Groq came from the sidebar.
+is in git, so **a fresh clone or a `git pull` on another machine has no credentials** —
+that is the first thing to hit on a new host. All five systems plus Groq can be entered
+through the Streamlit sidebar, which writes `credentials.json` and can **Test** each
+connection before saving. That is usually faster than copying `.env` across, and the
+test tells you whether that machine can actually reach each system.
+
+**Ceph specifics.** `CEPH_URL` must be the API base (`https://192.168.1.30:8443`), not
+the dashboard's browser address — the `/#/api-docs` fragment the UI shows is a frontend
+route the API never sees. The connection test strips it anyway, but the tool is happier
+with the base. `CEPH_VERIFY_TLS=false` because the dashboard uses a self-signed
+certificate.
 
 **Rotate the Prometheus and OpenSearch passwords** — they arrived via a Teams screenshot
 and appear in the original chat transcript.
 
+**Raise the Grafana exposure** with whoever runs `192.168.1.30`: its API answers
+unauthenticated on port 3000, and Ceph's `/api/settings` returns the Grafana password in
+plaintext (it is a default value). See §4.
+
+**Several credentials are dictionary words** — the system's own name, or `admin`. That
+surfaced while scanning the repo for leaked secrets: no secret is committed, but the
+scan produced false positives precisely because the values are ordinary words.
+
 **Testing costs tokens.** Only the `--llm` tier does; offline and live-tool tiers are
-free. The daily quota was exhausted twice by end-to-end testing.
+free. That tier is paced at 8s between cases (`IQCORE_EVAL_PACING`) because the models
+are capped per minute — at the old 1s it rate-limits and the failure looks like an
+extraction regression.
 
 **Restart the backend after changing `.env`** — `load_dotenv()` runs at import and
 `--reload` only watches `.py` files.
 
 **Windows note:** `pkill` does not exist; use `Stop-Process`. A stale uvicorn holding
-port 8000 produces `WinError 10013`, which looks like a code failure and is not.
+port 8000 produces `WinError 10013`, which looks like a code failure and is not. There
+is no venv in the repo on Windows; on Linux create one with `python3 -m venv venv &&
+source venv/bin/activate` (note `bin`, not `Scripts` — the README's install block is
+Linux-flavoured).
+
+**Running it.** `.claude/launch.json` starts the frontend; the backend is
+`cd backend && uvicorn main:app --host 0.0.0.0 --port 8000`.
 
 ---
 
 ## 11. How to work on this codebase
 
-1. **Probe before building.** Every good decision here came from querying the live system
-   first. Several planned features turned out to be impossible, and several assumptions
-   were wrong.
-2. **Prefer code to prompting** for anything checkable. The model will copy your examples.
-3. **Run the evals after every change** — `python tests/run_evals.py`.
-4. **Watch the token budget.** Test the tool layer directly; it is free and where the
-   logic lives.
-5. **Keep the domain routing rules intact.** The four systems watch different machines,
-   and blurring that produces confidently wrong answers.
+1. **Probe before building.** Read the API reference for the *running version* to get
+   the candidate surface, then query the live system to find what is actually populated,
+   and build only for the overlap. The docs and reality disagreed on the highest-value
+   item every single time: Zabbix inventory switched off, Ceph RGW not deployed, Zammad
+   ticket links unused. Building from documentation alone produces correct functions
+   that return nothing.
+2. **Prefer code to prompting** for anything checkable. The model will copy your
+   examples verbatim as values.
+3. **Run the evals after every change** — `python tests/run_evals.py` (137 checks, ~6
+   min, free). Use `--offline` (~13s) while iterating.
+4. **Watch the per-minute budget.** Test the tool layer directly; it is free and where
+   the logic lives. Three complex questions back to back will 429.
+5. **Keep the domain routing rules intact.** The five systems watch different machines,
+   and blurring that produces confidently wrong answers. Ceph is storage *under*
+   OpenStack; Prometheus watches VM CPU and memory *above* it; "how many VMs" is a
+   Prometheus question, not a Ceph one.
 6. **When a tool cannot answer, say so in the tool.** A misleading zero is worse than an
-   error.
+   error. Several answers now state an absence as a finding — "no ticket was raised",
+   "no disk failures are recorded", "RGW is not deployed".
+7. **Suspect silent truncation in every new API.** Three systems here paginate or cap
+   without saying so: Zammad search stops at 200, Ceph's image listing returned 5 of 37,
+   Zabbix item searches match template items that never hold values. Always check a
+   count against a second source before trusting it.
+8. **When a sample question maps to a convenient stand-in, the eval is lying.** The
+   Zabbix corpus passed while "what is the uptime of routers" returned nothing, because
+   the mapping pointed at a single-device query. Map the question as asked.
