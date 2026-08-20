@@ -647,3 +647,56 @@ def test_zammad_text_search_cap_is_reported():
     summary = query_zammad.invoke({"search": "interface"})["summary"]
     if "200 ticket(s) match" in summary:
         assert "MINIMUM" in summary, "a capped count is being presented as a total"
+
+
+def test_every_official_ceph_question_has_an_answering_query():
+    """The 19 questions Ceph is expected to answer, mapped to a real query."""
+    from golden_queries import CEPH_QUERIES, CEPH_SAMPLE_QUESTIONS
+    covered = {label for label, _, _ in CEPH_QUERIES}
+    missing = [(q, label) for q, label in CEPH_SAMPLE_QUESTIONS if label not in covered]
+    assert not missing, f"official questions with no answering query: {missing}"
+    assert len(CEPH_SAMPLE_QUESTIONS) == 19, "the official corpus is 19 questions"
+
+
+def test_ceph_endpoints_never_return_a_credential():
+    """/api/settings returns GRAFANA_API_PASSWORD in plaintext.
+
+    Answering "what is the Grafana URL" by handing that endpoint's output to a
+    model would put the password into the prompt and into the chat transcript.
+    The client whitelists specific keys rather than filtering on the way out.
+    """
+    from tools.ceph_tool import query_ceph
+    result = query_ceph.invoke({"query_type": "endpoints"})
+    blob = str(result["summary"]) + str(result["raw"])
+    for forbidden in ("PASSWORD", "SECRET", "ACCESS_KEY", "API_KEY"):
+        assert forbidden not in blob.upper(), f"{forbidden} leaked into a Ceph answer"
+    assert "GRAFANA_API_URL" in blob, "the URL that was actually asked for is missing"
+
+
+def test_ceph_crush_returns_the_hierarchy_a_treemap_needs():
+    """The treemap is drawn by the frontend from root -> host -> OSD rows."""
+    from tools.ceph_tool import query_ceph
+    df = query_ceph.invoke({"query_type": "crush"})["dataframe"]
+    assert not df.empty
+    for column in ("root", "host", "osd", "crush_weight", "size_GB"):
+        assert column in df.columns, f"{column} missing — the treemap cannot be drawn"
+    assert df["host"].nunique() >= 1 and len(df) >= df["host"].nunique()
+
+
+def test_ceph_logs_flag_concerning_entries_separately():
+    """General log AND the concerning subset; an absence of warnings is an answer."""
+    from tools.ceph_tool import query_ceph
+    result = query_ceph.invoke({"query_type": "logs"})
+    df, summary = result["dataframe"], result["summary"]
+    assert {"priority", "concerning", "disk_related"} <= set(df.columns)
+    assert "cluster log entr(ies)" in summary
+    if not df["concerning"].any():
+        assert "no disk failures" in summary.lower(), (
+            "no warnings were found and the answer does not say so")
+
+
+def test_ceph_snapshots_report_when_the_last_one_was_taken():
+    from tools.ceph_tool import query_ceph
+    result = query_ceph.invoke({"query_type": "snapshots"})
+    assert "Most recent snapshot taken" in result["summary"]
+    assert "taken_at" in result["dataframe"].columns

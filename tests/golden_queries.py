@@ -210,3 +210,48 @@ CEPH_QUERIES = [
      "in pool 'volumes'"),
     ("vm count is redirected", {"query_type": "images"}, "use query_prometheus"),
 ]
+
+
+# The 19 questions Ceph is officially expected to answer, mapped to the query
+# that answers each. Kept checkable rather than remembered: the Zabbix corpus
+# showed a tool can pass its evals while the question people actually ask
+# returns nothing.
+CEPH_QUERIES += [
+    ("snapshot details", {"query_type": "snapshots"}, "RBD snapshot(s)"),
+    ("last snapshot taken", {"query_type": "snapshots"}, "Most recent snapshot taken"),
+    ("snapshots are not backups", {"query_type": "snapshots"}, "not a backup"),
+    ("mds details", {"query_type": "cephfs"}, "MDS daemon(s)"),
+    ("cephfs clients", {"query_type": "cephfs"}, "Clients with the filesystem mounted"),
+    ("crush rule", {"query_type": "crush"}, "CRUSH rule(s)"),
+    ("replication details", {"query_type": "crush"}, "Replication by pool"),
+    ("crush hierarchy for a treemap", {"query_type": "crush"}, "hierarchy has"),
+    ("cluster logs", {"query_type": "logs"}, "cluster log entr(ies)"),
+    ("disk failures", {"query_type": "logs"}, "disk failures"),
+    ("hdd vs ssd", {"query_type": "osds"}, "By device class"),
+    ("grafana url", {"query_type": "endpoints"}, "GRAFANA_API_URL"),
+    ("prometheus url", {"query_type": "endpoints"}, "PROMETHEUS_API_HOST"),
+    ("rgw roles", {"query_type": "rgw"}, "NOT deployed"),
+]
+
+CEPH_SAMPLE_QUESTIONS = [
+    ("Crush rule", "crush rule"),
+    ("Give me the snapshot details", "snapshot details"),
+    ("Give me details of How many images, type and usage details", "rbd images"),
+    ("Give me MDS Details", "mds details"),
+    ("How many client in ceph fs?", "cephfs clients"),
+    ("How many snapshot are saved and when was the last snapshot taken?",
+     "last snapshot taken"),
+    ("What are the Replication Details and status?", "replication details"),
+    ("Get me Prometheus URL?", "prometheus url"),
+    ("What is the current CEPH status?", "cluster health"),
+    ("Are there any disk failures and what are logs?", "disk failures"),
+    ("Give me the CEPH OSD Treemap", "crush hierarchy for a treemap"),
+    ("What is the CEPH OSD Status?", "osds"),
+    ("What are the R-G-W roles configured?", "rgw roles"),
+    ("How much storage is used and how much is free?", "free space"),
+    ("How many OSDs are HDD and how many are SDD?", "hdd vs ssd"),
+    ("Get me Graphana URL", "grafana url"),
+    ("What are the Host Details?", "hosts"),
+    ("What are the CEPH OSD Pool details", "pools in use"),
+    ("Give me information about rbd", "rbd images"),
+]

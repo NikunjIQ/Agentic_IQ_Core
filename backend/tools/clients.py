@@ -638,3 +638,53 @@ class CephClient:
             return self.get("/api/rgw/daemon") or []
         except Exception:
             return []
+
+    # ---- families the 19 official questions need -------------------------
+
+    def crush_rules(self) -> list:
+        return self.get("/api/crush_rule") or []
+
+    def cephfs(self) -> list:
+        return self.get("/api/cephfs") or []
+
+    def cephfs_clients(self, fs_id) -> list:
+        """Clients with the filesystem mounted.
+
+        Wrapped in {'status': 0, 'data': [...]}, and an empty list is a real
+        finding — nothing is mounting it — not a failed call.
+        """
+        try:
+            payload = self.get(f"/api/cephfs/{fs_id}/clients") or {}
+            data = payload.get("data")
+            return data if isinstance(data, list) else []
+        except Exception:
+            return []
+
+    def logs(self) -> dict:
+        """Cluster log and audit log. Each entry carries a priority."""
+        try:
+            return self.get("/api/logs/all") or {}
+        except Exception:
+            return {}
+
+    # Only these settings may ever leave this client. /api/settings returns
+    # GRAFANA_API_PASSWORD in plaintext, and answering "what is the Grafana URL"
+    # by handing the endpoint's output to a model would put that password into
+    # the prompt and into the chat transcript. A whitelist, never a filter on
+    # the way out.
+    SAFE_SETTINGS = (
+        "GRAFANA_API_URL",
+        "GRAFANA_FRONTEND_API_URL",
+        "PROMETHEUS_API_HOST",
+        "ALERTMANAGER_API_HOST",
+        "GRAFANA_UPDATE_DASHBOARDS",
+    )
+
+    def endpoints(self) -> dict:
+        """The monitoring URLs Ceph is configured against — whitelisted keys only."""
+        try:
+            rows = self.get("/api/settings") or []
+        except Exception:
+            return {}
+        return {s.get("name"): s.get("value") for s in rows
+                if s.get("name") in self.SAFE_SETTINGS}

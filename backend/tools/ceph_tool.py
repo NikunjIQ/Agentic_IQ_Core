@@ -42,6 +42,16 @@ _POOL_PURPOSE = {
 }
 
 
+# Cluster-log priorities. Ceph writes [INF] for routine chatter and reserves the
+# rest for anything an operator should see, so the split is Ceph's own, not ours.
+_LOG_CONCERNING = ("[WRN]", "[ERR]", "[SEC]")
+
+# Words that mark a log line as being about a failing disk rather than about
+# anything else that went wrong.
+_DISK_FAILURE_HINTS = ("osd", "disk", "device", "smart", "slow ops", "bluestore",
+                       "read error", "failed", "down")
+
+
 def _latest(stats: dict, key: str):
     """Pool statistics arrive either as a scalar or as {'latest': n}."""
     value = (stats or {}).get(key)
@@ -82,13 +92,21 @@ def query_ceph(
     the other four: Prometheus watches the Linux hosts and VM CPU/memory, Ceph
     watches the disks, pools and replication under them.
 
-    - query_type: 'health' (default) | 'capacity' | 'pools' | 'osds' | 'hosts' | 'images'.
-      'health' = cluster status, failing checks, firing alerts, PG state.
-      'capacity' = how much storage is free, raw AND usable after replication.
-      'pools' = per-pool usage and what each pool is for.
-      'osds' = per-disk state and distribution across hosts.
-      'images' = RBD images, i.e. Cinder volumes, Glance images and VM disks.
-      'hosts' = the machines in the cluster.
+    - query_type: one of
+      'health'    cluster status, failing checks, firing alerts, PG state.
+      'capacity'  how much storage is free, raw AND usable after replication.
+      'pools'     per-pool usage and what each pool is for.
+      'osds'      per-disk state, host distribution, and the HDD/SSD breakdown.
+      'hosts'     the machines in the cluster.
+      'images'    RBD images: Cinder volumes, Glance images and VM disks.
+      'snapshots' snapshot names, sizes, ages and when the most recent was taken.
+      'cephfs'    filesystems, MDS daemons and their state, mounted client count.
+      'crush'     CRUSH rules, the failure domain, replication per pool, and the
+                  root->host->OSD hierarchy (the data a treemap is drawn from).
+      'logs'      recent cluster log, with warnings/errors and disk-related
+                  entries flagged separately from routine informational ones.
+      'endpoints' the Grafana / Prometheus / Alertmanager URLs Ceph points at.
+      'rgw'       object gateway. Not deployed here, so this states that.
     - pool_filter: limit 'images' to one pool ('volumes', 'images', 'vms', 'backups').
     - host_filter: limit 'osds' to one host ('server01', 'server02', 'server03').
 
@@ -100,8 +118,13 @@ def query_ceph(
       free differ by the replication factor; the answer reports both.
     - "backups" -> query_type='pools'. Snapshots are not backups and the answer
       distinguishes them.
-    - S3, object storage, buckets: RGW is not deployed on this cluster, so those
-      cannot be answered. The tool says so rather than returning an error.
+    - S3, object storage, buckets, RGW roles -> query_type='rgw'. RGW is not
+      deployed here, so the tool states that rather than returning an error.
+    - "are there disk failures" -> query_type='logs'. It returns the general log
+      AND flags the concerning entries; no warnings at all is itself the answer.
+    - "how many snapshots / when was the last one" -> query_type='snapshots'.
+    - "crush rule", "replication details", "OSD treemap" -> query_type='crush'.
+    - "Grafana URL", "Prometheus URL" -> query_type='endpoints'.
     """
     client = CephClient()
     if not client.configured:
@@ -224,9 +247,12 @@ def query_ceph(
                 if host_filter and host_filter.lower() not in str(host).lower():
                     continue
                 stats = o.get("stats") or {}
+                tree = o.get("tree") or {}
                 rows.append({"osd": o.get("osd"), "host": host,
                              "state": "+".join(o.get("state") or []),
                              "up": "up" in (o.get("state") or []),
+                             "device_class": tree.get("device_class") or "unknown",
+                             "crush_weight": round(tree.get("crush_weight") or 0, 3),
                              "size_GB": round((stats.get("stat_bytes") or 0) / GB, 1)})
             table = pd.DataFrame(rows)
             up = sum(1 for r in rows if r["up"])
@@ -238,6 +264,18 @@ def query_ceph(
                        f"Distribution by host: "
                        f"{', '.join(f'{h}: {n}' for h, n in sorted(by_host.items()))}. "
                        f"Total raw capacity: {sum(r['size_GB'] for r in rows):.1f} GB.")
+            # "How many OSDs are HDD and how many are SSD" is asked directly, and
+            # the class lives in the CRUSH tree, not on the OSD record.
+            classes = {}
+            for r in rows:
+                classes[r["device_class"]] = classes.get(r["device_class"], 0) + 1
+            summary += (" By device class: "
+                        + ", ".join(f"{n} {c.upper()}" for c, n in sorted(classes.items()))
+                        + ".")
+            if len(classes) == 1 and "hdd" in classes:
+                summary += (" There are no SSD-backed OSDs in this cluster — every OSD "
+                            "is spinning disk.")
+
             down = [r for r in rows if not r["up"]]
             if down:
                 summary += (" NOT UP: " + ", ".join(f"osd.{r['osd']} on {r['host']} "
@@ -303,8 +341,226 @@ def query_ceph(
                             f"count use query_prometheus, not this tool. ")
             return {"summary": summary, "dataframe": table, "raw": {"images": groups}}
 
+        # ------------------------------------------------------ snapshots
+        if kind in ("snapshots", "snapshot", "snaps"):
+            groups = client.images()
+            rows = []
+            for group in groups:
+                pool = group.get("pool_name")
+                if pool_filter and pool_filter.lower() != str(pool).lower():
+                    continue
+                for image in (group.get("value") or []):
+                    for snap in (image.get("snapshots") or []):
+                        rows.append({
+                            "pool": pool,
+                            "image": image.get("name"),
+                            "snapshot": snap.get("name"),
+                            "taken_at": snap.get("timestamp"),
+                            "size_GB": round(float(snap.get("size") or 0) / GB, 2),
+                            "protected": snap.get("is_protected"),
+                        })
+            table = pd.DataFrame(rows)
+            scope = f" in pool '{pool_filter}'" if pool_filter else ""
+            if not rows:
+                return {"summary": f"No RBD snapshots exist{scope}.",
+                        "dataframe": table, "raw": {"snapshots": rows}}
+
+            dated = [r["taken_at"] for r in rows if r["taken_at"]]
+            by_pool = {}
+            for r in rows:
+                by_pool[r["pool"]] = by_pool.get(r["pool"], 0) + 1
+            pool_text = ", ".join(f"{p}: {n}" for p, n in sorted(by_pool.items()))
+            protected = sum(1 for r in rows if r["protected"] in (True, "True", "true"))
+
+            summary = (f"{len(rows)} RBD snapshot(s){scope} across {len(by_pool)} "
+                       f"pool(s): {pool_text}. ")
+            if dated:
+                summary += (f"Most recent snapshot taken {max(dated)}; "
+                            f"oldest {min(dated)}. ")
+            summary += f"{protected} of {len(rows)} are protected. "
+            summary += ("A snapshot is not a backup — it lives in the same pool as the "
+                        "image it came from, so it does not survive losing that pool. "
+                        "Cinder backups would land in the `backups` pool, which is empty.")
+            return {"summary": summary, "dataframe": table, "raw": {"snapshots": rows}}
+
+        # --------------------------------------------------------- cephfs
+        if kind in ("cephfs", "fs", "mds", "filesystem"):
+            filesystems = client.cephfs()
+            rows = []
+            total_clients = 0
+            names = []
+            for fs in filesystems:
+                mdsmap = fs.get("mdsmap") or {}
+                names.append(f"'{mdsmap.get('fs_name')}' "
+                             f"(max_mds={mdsmap.get('max_mds')})")
+                clients = client.cephfs_clients(fs.get("id"))
+                total_clients += len(clients)
+                daemons = mdsmap.get("info") or {}
+                if not daemons:
+                    rows.append({"filesystem": mdsmap.get("fs_name"),
+                                 "mds": "(none up)", "state": "no active MDS",
+                                 "rank": None, "address": "", "clients": len(clients)})
+                for daemon in daemons.values():
+                    rows.append({
+                        "filesystem": mdsmap.get("fs_name"),
+                        "mds": daemon.get("name"),
+                        "state": daemon.get("state"),
+                        "rank": daemon.get("rank"),
+                        "address": str(daemon.get("addr", "")).split("/")[0],
+                        "clients": len(clients),
+                    })
+            table = pd.DataFrame(rows)
+            active = [r for r in rows if str(r.get("state", "")).startswith("up:active")]
+            daemon_text = "; ".join(f"{r['mds']} {r['state']} rank {r['rank']}"
+                                    for r in rows if r.get("mds") != "(none up)")
+
+            summary = (f"{len(filesystems)} CephFS filesystem(s): {', '.join(names)}. "
+                       f"{len(rows)} MDS daemon(s), {len(active)} active"
+                       + (f": {daemon_text}. " if daemon_text else ". ")
+                       + f"Clients with the filesystem mounted: {total_clients}. ")
+            if total_clients == 0:
+                summary += ("Nothing is currently mounting CephFS — the filesystem is "
+                            "healthy but unused, which is different from being broken.")
+            return {"summary": summary, "dataframe": table,
+                    "raw": {"cephfs": filesystems}}
+
+        # ---------------------------------------------------------- crush
+        if kind in ("crush", "replication", "crush_rule", "topology", "tree"):
+            rules = client.crush_rules()
+            pools = client.pools()
+            osds = client.osds()
+            _, status, _, _, pg_states, _, _, _ = _health_summary(client)
+
+            rule_rows = []
+            for rule in rules:
+                steps = rule.get("steps") or []
+                choose = next((st for st in steps if st.get("type")), {})
+                rule_rows.append({
+                    "rule": rule.get("rule_name"),
+                    "rule_id": rule.get("rule_id"),
+                    "failure_domain": choose.get("type", "unknown"),
+                    "root": next((st.get("item_name") for st in steps
+                                  if st.get("item_name")), "default"),
+                })
+            root = rule_rows[0]["root"] if rule_rows else "default"
+            domain = rule_rows[0]["failure_domain"] if rule_rows else "host"
+
+            # The CRUSH hierarchy, root -> host -> osd, returned as rows so the
+            # frontend can draw a treemap from it. The model reads the summary.
+            tree_rows = []
+            for o in osds:
+                tree = o.get("tree") or {}
+                tree_rows.append({
+                    "root": root,
+                    "host": (o.get("host") or {}).get("name", "?"),
+                    "osd": f"osd.{o.get('osd')}",
+                    "device_class": tree.get("device_class") or "unknown",
+                    "crush_weight": round(tree.get("crush_weight") or 0, 3),
+                    "size_GB": round((o.get("stats") or {}).get("stat_bytes", 0) / GB, 1),
+                    "up": "up" in (o.get("state") or []),
+                })
+
+            by_size = {}
+            for pool in pools:
+                by_size.setdefault(pool.get("size"), []).append(pool.get("pool_name"))
+
+            rule_text = "; ".join(f"'{r['rule']}' replicates across {r['failure_domain']}s "
+                                  f"from root '{r['root']}'" for r in rule_rows)
+            repl_text = "; ".join(f"{n} copies — {', '.join(sorted(names_))}"
+                                  for n, names_ in sorted(by_size.items()))
+            pg_text = ", ".join(f"{k}: {v}" for k, v in pg_states.items())
+            hosts = {r["host"] for r in tree_rows}
+
+            summary = (f"{len(rules)} CRUSH rule(s): {rule_text}. "
+                       f"Replication by pool: {repl_text}. "
+                       f"Placement group health: {pg_text}, cluster {status}. "
+                       f"The hierarchy has {len(hosts)} host(s) and {len(tree_rows)} "
+                       f"OSD(s), so a failure domain of '{domain}' means copies of an "
+                       f"object never share a host. ")
+            if by_size and min(by_size) == 2:
+                summary += ("NOTE: the 2-copy pools tolerate ONE host failing. Losing a "
+                            "second host before recovery finished would mean data loss.")
+            return {"summary": summary, "dataframe": pd.DataFrame(tree_rows),
+                    "raw": {"crush_rules": rules, "hierarchy": tree_rows,
+                            "pool_replication": {str(k): v for k, v in by_size.items()}}}
+
+        # ----------------------------------------------------------- logs
+        if kind in ("logs", "log", "events", "failures"):
+            payload = client.logs()
+            rows = []
+            for channel in ("clog", "audit_log"):
+                for entry in (payload.get(channel) or []):
+                    priority = str(entry.get("priority") or "").strip()
+                    message = str(entry.get("message") or "")
+                    rows.append({
+                        "channel": channel,
+                        "priority": priority,
+                        "concerning": priority in _LOG_CONCERNING,
+                        "disk_related": any(h in message.lower()
+                                            for h in _DISK_FAILURE_HINTS),
+                        "message": message[:300],
+                        "at": entry.get("stamp"),
+                    })
+            table = pd.DataFrame(rows)
+            concerning = [r for r in rows if r["concerning"]]
+            disk = [r for r in concerning if r["disk_related"]]
+            counts = {}
+            for r in rows:
+                counts[r["priority"] or "unlabelled"] = \
+                    counts.get(r["priority"] or "unlabelled", 0) + 1
+            count_text = ", ".join(f"{k}: {v}" for k, v in sorted(counts.items()))
+
+            summary = f"{len(rows)} recent cluster log entr(ies) ({count_text}). "
+            if concerning:
+                detail = " | ".join(f"[{r['priority']}] {r['message'][:120]}"
+                                    for r in concerning[:6])
+                summary += (f"{len(concerning)} entr(ies) are warnings or errors: "
+                            f"{detail}. ")
+                summary += (f"{len(disk)} of those mention a disk or OSD. " if disk
+                            else "None of them mention a disk or OSD. ")
+            else:
+                # The absence IS the answer to "are there any disk failures", so it
+                # is stated rather than left as an empty table.
+                summary += ("Every entry is informational — there are no warnings or "
+                            "errors in the cluster log, so NO disk failures are "
+                            "recorded. This is the recent log only, not the full "
+                            "history: a disk that failed long ago and was replaced "
+                            "would no longer appear here. ")
+            return {"summary": summary, "dataframe": table, "raw": {"logs": payload}}
+
+        # ------------------------------------------------------ endpoints
+        if kind in ("endpoints", "urls", "url", "settings", "grafana", "prometheus"):
+            found = client.endpoints()
+            rows = [{"setting": k, "value": v if v not in ("", None) else "(not set)"}
+                    for k, v in found.items()]
+            listed = "; ".join(f"{r['setting']} = {r['value']}" for r in rows)
+            summary = (f"Monitoring endpoints Ceph is configured against: {listed}. "
+                       f"These are configuration values, not storage data. Only these "
+                       f"specific settings are read — the settings endpoint also "
+                       f"returns credentials, which are never retrieved.")
+            return {"summary": summary, "dataframe": pd.DataFrame(rows),
+                    "raw": {"endpoints": found}}
+
+        # ------------------------------------------------------------ rgw
+        if kind in ("rgw", "roles", "buckets", "s3", "object"):
+            daemons = client.rgw_daemons()
+            if not daemons:
+                return {"summary": ("The RADOS Gateway (RGW) is NOT deployed on this "
+                                    "cluster — zero RGW daemons are running. So there "
+                                    "are no S3 buckets, no object-storage users and no "
+                                    "RGW roles to report. This is a deployment fact, "
+                                    "not a permissions or connectivity problem: asking "
+                                    "Ceph for buckets returns a server error because "
+                                    "the service does not exist."),
+                        "dataframe": pd.DataFrame(), "raw": {"rgw_daemons": []}}
+            rows = [{"daemon": d.get("id"), "host": d.get("server_hostname"),
+                     "version": d.get("version")} for d in daemons]
+            return {"summary": f"{len(rows)} RGW daemon(s) running.",
+                    "dataframe": pd.DataFrame(rows), "raw": {"rgw_daemons": daemons}}
+
         return {"summary": f"Unsupported query_type '{query_type}'. Supported: health, "
-                           f"capacity, pools, osds, hosts, images.",
+                           f"capacity, pools, osds, hosts, images, snapshots, "
+                           f"cephfs, crush, logs, endpoints, rgw.",
                 "dataframe": pd.DataFrame(), "raw": {}}
 
     except Exception as exc:
