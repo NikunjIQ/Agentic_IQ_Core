@@ -183,6 +183,47 @@ answer is written.
 
 ---
 
+## Token telemetry
+
+Every answer carries what it cost, because the models are capped **per minute** and
+"that felt expensive" is not something you can optimise.
+
+```
+🎫 3,207 tokens · 40% of a minute's allowance · 3 model call(s) · 3.2s
+```
+
+A **Token breakdown** expander below it shows where they went:
+
+| Operation | Calls | Tokens | Share |
+|---|---:|---:|---:|
+| Deciding which system to check | 1 | 1,170 | 36.5% |
+| Working out the tool arguments | 1 | 1,134 | 35.4% |
+| Writing the answer | 1 | 903 | 28.2% |
+
+…plus every individual call with its model, input, output, **thinking** tokens and
+duration.
+
+Every figure comes from Groq's own `usage_metadata` on the response. Nothing is
+estimated — an earlier round of optimisation was costed by counting characters and
+understated a simple question by roughly half.
+
+Three things the display is deliberate about:
+
+- **Reasoning tokens are shown separately.** Around 57% of output tokens on a typical
+  question are the model thinking before it answers: billed, and never visible in the
+  reply.
+- **A cache hit reports `0 tokens`**, with the original cost beside it. Replaying the
+  first answer's figures would double-count it and make the cache look useless.
+- **A call that returns no usage figures is counted and named**, so a missing
+  measurement reads as a gap rather than a smaller total. A call that *failed* is
+  recorded too — it spent tokens.
+
+Measurement never costs an answer: the streaming path merges chunks only to recover
+usage, and a stream whose chunks cannot be merged is left unmeasured rather than
+raising.
+
+---
+
 ## Guardrails
 
 | Guard | Purpose |
@@ -201,7 +242,7 @@ answer is written.
 python tests/run_evals.py
 ```
 
-137 checks in about 6 minutes. No pytest needed; works under pytest unchanged.
+143 checks in about 6 minutes. No pytest needed; works under pytest unchanged.
 
 ```bash
 python tests/run_evals.py --offline    # no network, ~13s
@@ -219,9 +260,10 @@ error, and only an eval catches that.
 ## Known constraints
 
 **Groq's per-minute cap is the binding limit.** The gpt-oss models allow **8,000
-tokens/minute**. A simple question costs ~1,528 (19% of a minute); a complex one with
-4 tool calls costs ~20,836 (2.6 minutes), so a few in quick succession will 429. Test
-the connection through the sidebar — it uses Groq's models endpoint and spends nothing.
+tokens/minute**. Measured through the telemetry above, a simple single-tool question
+costs **2,800–3,200 tokens — roughly 40% of a minute's allowance** — so three in quick
+succession will 429. Complex multi-tool questions cost several times that. Test the
+connection through the sidebar; it uses Groq's models endpoint and spends nothing.
 
 **Providers retire models.** Both original models were decommissioned mid-project and
 began 404-ing mid-answer. Ids live in `backend/agent/models.py`, are overridable by

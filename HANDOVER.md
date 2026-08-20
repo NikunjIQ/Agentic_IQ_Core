@@ -6,7 +6,7 @@ built, why it is built that way, what is wrong with it, and what was planned nex
 Repo: `https://github.com/NikunjIQ/Agentic_IQ_Core` (private)
 Local: `C:\Users\NikunjSinha(Identiqa\Desktop\Agentic_IQ_Core`
 Scale: ~9,200 lines of Python, 61 tracked files.
-Tests: 137 checks (`python tests/run_evals.py`), all passing.
+Tests: 143 checks (`python tests/run_evals.py`), all passing.
 
 ---
 
@@ -93,8 +93,9 @@ example verbatim as a value.
 | `backend/agent/clarify.py` | Builds clarifying questions from live values |
 | `backend/agent/voice.py` | Answer style |
 | `backend/agent/suggestions.py` | Deterministic follow-up chips |
-| `backend/agent/streaming.py` | SSE status + token streaming |
-| `tests/run_evals.py` | Standalone eval harness (137 checks) |
+| `backend/agent/streaming.py` | SSE status, node events, token streaming |
+| `backend/agent/telemetry.py` | Per-call token usage, from Groq's own figures |
+| `tests/run_evals.py` | Standalone eval harness (143 checks) |
 
 ---
 
@@ -267,6 +268,7 @@ Zabbix/Zammad work.
 | `eb44481` | The 19 official Ceph questions, all answerable |
 | `b1ad5a2` | CRUSH treemap in the frontend; settings boundary recorded |
 | `7954bca` | Ceph added to the credential sidebar, with a connection test |
+| `a44d07a` | **Token telemetry** — every answer shows where its tokens went |
 
 **The method that produced all of it**, and the one to keep using: read the API
 reference for the *running version* to get the candidate surface, then **probe the live
@@ -383,10 +385,30 @@ that did not even list Ceph.
 ## 8. Cons
 
 - **Tokens are capped PER MINUTE now, not per day.** The gpt-oss models allow
-  **8,000 tokens/minute**. A simple question costs ~1,528 (19% of a minute); a complex
-  one with 4 tool calls costs ~20,836 (2.6 minutes). Three questions in quick succession
-  will 429. This is a different constraint from the old daily budget and bites during
-  demos rather than at the end of the day.
+  **8,000 tokens/minute**. Three questions in quick succession will 429. This is a
+  different constraint from the old daily budget and bites during demos rather than at
+  the end of the day.
+- **The costs are now measured, and the old estimates were wrong.** `agent/telemetry.py`
+  records Groq's own usage per call and every answer displays it. Measured on a simple
+  single-tool question:
+
+  | Operation | Model | In | Out | Thinking | Total |
+  |---|---|---:|---:|---:|---:|
+  | classify | gpt-oss-20b | 1,034 | 136 | 110 | 1,170 |
+  | extract | gpt-oss-20b | 1,056 | 78 | 52 | 1,134 |
+  | synthesise | gpt-oss-120b | 647 | 256 | 107 | 903 |
+  | **total** | | | | **269** | **3,207** |
+
+  That is **~40% of a minute's allowance for the cheapest kind of question**, against
+  the ~1,528 that character-counting predicted. Any future optimisation should start
+  from telemetry, not from estimates.
+- **Classification is the single most expensive operation** at ~36% — more than writing
+  the answer. It was optimised once already (routing summaries cut it from 3,257 to 726
+  estimated tokens) and is still the largest line. Its input is ~1,034 tokens measured,
+  so the estimate understated it too.
+- **Reasoning is ~57% of all output tokens.** gpt-oss models think before answering;
+  that work is billed and invisible in the reply. It is broken out separately in the
+  telemetry because it is a real lever nobody could see before.
 - **Complex questions are still expensive.** 76% of each orchestrator iteration is tool
   schemas, resent every loop. Trimming got them from 3,804 to ~2,900 tokens; going
   further needs schema subsetting, which is designed but not built (see §9).
@@ -543,7 +565,7 @@ Linux-flavoured).
    that return nothing.
 2. **Prefer code to prompting** for anything checkable. The model will copy your
    examples verbatim as values.
-3. **Run the evals after every change** — `python tests/run_evals.py` (137 checks, ~6
+3. **Run the evals after every change** — `python tests/run_evals.py` (143 checks, ~6
    min, free). Use `--offline` (~13s) while iterating.
 4. **Watch the per-minute budget.** Test the tool layer directly; it is free and where
    the logic lives. Three complex questions back to back will 429.
@@ -561,3 +583,11 @@ Linux-flavoured).
 8. **When a sample question maps to a convenient stand-in, the eval is lying.** The
    Zabbix corpus passed while "what is the uptime of routers" returned nothing, because
    the mapping pointed at a single-device query. Map the question as asked.
+9. **Measure before optimising, and never estimate tokens.** Character counting
+   understated a simple question by roughly half and got the ranking of operations
+   wrong. `agent/telemetry.py` reports Groq's own figures per call; read those.
+10. **Instrumentation must never cost an answer.** Merging stream chunks to recover
+    usage broke a stream whose chunks could not be added. `stream_text` now degrades to
+    unmeasured rather than raising; `stream_with_tools` deliberately does not, because
+    there the merge is load-bearing — `tool_calls` are only recoverable from the merged
+    message.
