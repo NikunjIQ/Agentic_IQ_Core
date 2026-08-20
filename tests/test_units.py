@@ -691,10 +691,18 @@ def test_config_save_clears_every_cache():
 def test_config_field_groups_cover_every_system():
     from agent import config_store
     systems = {group[0] for group in config_store.FIELD_GROUPS}
-    assert systems == {"Zabbix", "Zammad", "Prometheus", "OpenSearch", "Groq"}
+    assert systems == {"Zabbix", "Zammad", "Prometheus", "OpenSearch", "Ceph", "Groq"}
     for key in ("ZABBIX_API_TOKEN", "ZAMMAD_PASS", "PROMETHEUS_PASS",
-                "OPENSEARCH_PASS", "GROQ_API_KEY"):
+                "OPENSEARCH_PASS", "CEPH_PASS", "GROQ_API_KEY"):
         assert key in config_store.SECRET_KEYS, f"{key} must be treated as a secret"
+
+    # A system reachable by a tool but absent from the form can only be
+    # configured by editing a file on the server, which is the thing the sidebar
+    # exists to avoid.
+    from agent.tool_registry import TOOL_REGISTRY
+    from agent.config_test import TESTS
+    assert "query_ceph" in TOOL_REGISTRY and "Ceph" in TESTS, (
+        "Ceph is queryable but has no connection test in the sidebar")
 
 
 def test_config_test_messages_are_actionable():

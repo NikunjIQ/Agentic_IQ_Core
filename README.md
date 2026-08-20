@@ -120,6 +120,8 @@ configured, so nothing there can raise a ticket.
 
 - Python 3.10+
 - Network reach to your Zabbix / Zammad / Prometheus / OpenSearch / Ceph
+- Ceph needs a username and password: the dashboard issues a short-lived
+  token and offers no long-lived API key
 - A Groq API key
 
 ### Install

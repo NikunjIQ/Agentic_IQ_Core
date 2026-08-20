@@ -164,6 +164,63 @@ def test_opensearch(cfg: dict) -> dict:
         return _fail(_describe(exc))
 
 
+def test_ceph(cfg: dict) -> dict:
+    """Log in and read cluster health.
+
+    Reaching the dashboard is not enough: the API refuses an unversioned Accept
+    header with 415, and every endpoint has its own version, so a check that only
+    confirmed the port was open would pass against a cluster nothing can query.
+    """
+    url = str(cfg.get("CEPH_URL", "")).strip().rstrip("/")
+    if not url:
+        return _fail("no URL set")
+    # The dashboard's browser address carries a frontend fragment the API never
+    # sees; strip it so a pasted URL still works.
+    if "/#" in url:
+        url = url.split("/#")[0].rstrip("/")
+
+    user = str(cfg.get("CEPH_USER", "")).strip()
+    password = str(cfg.get("CEPH_PASS", "")).strip()
+    if not (user and password):
+        return _fail("no username/password given — Ceph has no long-lived API key")
+
+    verify = str(cfg.get("CEPH_VERIFY_TLS", "false")).strip().lower() in ("1", "true", "yes")
+    if not verify:
+        try:
+            import urllib3
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        except Exception:
+            pass
+
+    accept = {"Accept": "application/vnd.ceph.api.v1.0+json",
+              "Content-Type": "application/json"}
+    try:
+        auth = requests.post(f"{url}/api/auth", verify=verify, timeout=TIMEOUT,
+                             headers=accept,
+                             json={"username": user, "password": password})
+        if auth.status_code in (400, 401, 403):
+            return _fail("reachable, but the username/password was rejected")
+        if auth.status_code == 415:
+            return _fail("reachable, but refused the API version — is this a Ceph dashboard?")
+        auth.raise_for_status()
+        token = (auth.json() or {}).get("token")
+        if not token:
+            return _fail("signed in, but no token was returned")
+
+        health = requests.get(f"{url}/api/health/minimal", verify=verify, timeout=TIMEOUT,
+                              headers={"Accept": "application/vnd.ceph.api.v1.0+json",
+                                       "Authorization": f"Bearer {token}"})
+        if health.status_code == 401:
+            return _fail("signed in, but the token was not accepted")
+        health.raise_for_status()
+        body = health.json() or {}
+        status = (body.get("health") or {}).get("status", "unknown")
+        osds = len((body.get("osd_map") or {}).get("osds") or [])
+        return _ok(f"Ceph — signed in as {user}, cluster {status}, {osds} OSD(s)")
+    except Exception as exc:
+        return _fail(_describe(exc))
+
+
 def test_groq(cfg: dict) -> dict:
     key = str(cfg.get("GROQ_API_KEY", "")).strip()
     if not key:
@@ -190,6 +247,7 @@ TESTS = {
     "Zabbix": test_zabbix,
     "Zammad": test_zammad,
     "Prometheus": test_prometheus,
+    "Ceph": test_ceph,
     "OpenSearch": test_opensearch,
     "Groq": test_groq,
 }

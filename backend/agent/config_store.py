@@ -44,6 +44,14 @@ FIELD_GROUPS = [
         ("OPENSEARCH_USER", "Username", False, ""),
         ("OPENSEARCH_PASS", "Password", True, ""),
     ]),
+    ("Ceph", "Storage under OpenStack: pools, OSDs, RBD images", [
+        ("CEPH_URL", "URL", False, "https://192.168.1.30:8443"),
+        ("CEPH_USER", "Username", False, "admin"),
+        ("CEPH_PASS", "Password", True, ""),
+        # Most dashboards run a self-signed certificate. Left as a field rather
+        # than assumed, so a cluster with a real certificate can verify it.
+        ("CEPH_VERIFY_TLS", "Verify TLS certificate (true/false)", False, "false"),
+    ]),
     ("Groq", "The AI model provider", [
         ("GROQ_API_KEY", "API key", True, ""),
     ]),
