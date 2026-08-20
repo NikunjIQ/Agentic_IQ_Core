@@ -20,6 +20,7 @@ is the most common way to break it.
 
 | System | Watches | Address |
 |---|---|---|
+| Ceph | Storage under OpenStack: pools, OSDs, RBD images | `192.168.1.30:8443` |
 | Zabbix | Cisco routers/switches (`.73/.74/.75`), Windows hosts, a few Linux boxes | `192.168.1.205:8080` |
 | Prometheus | Linux cluster `server01/02/03`, OpenStack, 7 VMs, containers | `192.168.1.29:9190` |
 | OpenSearch | OpenStack service logs only (`flog-*`) | `192.168.1.32:9200` |
@@ -141,6 +142,39 @@ inferred from names and labelled as an inference.
 
 **Neither Prometheus nor OpenSearch enforces authentication** — both answer identically
 with and without credentials.
+
+**Ceph's settings endpoint returns a credential in plaintext.** `GET /api/settings`
+on the Ceph dashboard API includes `GRAFANA_API_PASSWORD`, and its value here is
+`admin`. Any account that can log into the dashboard can read it. Two consequences:
+
+1. *For this app* — this is a hard boundary, not a preference. Answering "what is the
+   Grafana URL" by fetching that endpoint and handing the result to a model would put
+   the password into the prompt and into the chat transcript, where it would persist.
+   `CephClient.SAFE_SETTINGS` therefore **whitelists five setting names**
+   (`GRAFANA_API_URL`, `GRAFANA_FRONTEND_API_URL`, `PROMETHEUS_API_HOST`,
+   `ALERTMANAGER_API_HOST`, `GRAFANA_UPDATE_DASHBOARDS`) and returns nothing else. It
+   is a whitelist rather than a filter on the way out, because a filter has to
+   anticipate every key a future Ceph release might add. An eval asserts no
+   `PASSWORD`/`SECRET`/`KEY`-shaped value ever reaches an answer.
+2. *For the infrastructure* — the Grafana instance at `192.168.1.30:3000` also answers
+   its API **without any authentication at all**: `/api/search` and `/api/datasources`
+   both return real JSON to an unauthenticated caller. So the dashboards and the
+   datasource configuration (hostnames, ports, usernames, database names) are readable
+   by anyone who can reach the port, and the admin password is `admin`. This is an
+   infrastructure problem no amount of app work fixes; it needs raising with whoever
+   runs that host.
+
+**Ceph's block-image endpoint pages silently.** `GET /api/block/image` returned 5
+images of 37 by default and omitted the `volumes` pool entirely — the one holding the
+Cinder data — so a caller trusting the default would report that Cinder volumes do not
+exist. `limit=-1` is mandatory. `GET /api/pool` likewise reports every pool at zero
+bytes without `stats=true`, which reads as an empty cluster.
+
+**Ceph's API versions are per-endpoint and not guessable.** `/api/host` answers at
+v1.3, `/api/block/image` and `/api/crush_rule` at v2.0, `/api/monitor` at v1.0 and
+`/api/osd/settings` at v0.1. The wrong version returns **415**, which reads like a
+malformed request rather than a header mismatch. `CEPH_API_VERSIONS` records the ones
+that differ from the 1.0 default.
 
 **Zabbix host inventory is switched off.** 10 of 11 hosts have `inventory_mode = disabled`;
 the eleventh is automatic and holds only latitude and longitude. So EOL/EOS, model, serial

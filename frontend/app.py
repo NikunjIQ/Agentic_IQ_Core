@@ -4,6 +4,7 @@ import os
 import requests
 import pandas as pd
 
+import ceph_treemap
 import live_graph
 import streamlit as st
 
@@ -215,8 +216,19 @@ if user_input:
                 st.caption(f"↺ cached answer ({result.get('cache_age_seconds', 0)}s old)")
 
             for frame in result.get("dataframes", []):
-                if frame:
-                    st.dataframe(pd.DataFrame(frame), use_container_width=True)
+                if not frame:
+                    continue
+                table = pd.DataFrame(frame)
+                # The CRUSH hierarchy is the one result whose shape is easier to
+                # see than to read: capacity split across hosts, and which OSD
+                # is down. Detected by its columns rather than by tool name, so
+                # any query returning that shape gets drawn.
+                if {"host", "osd", "size_GB"} <= set(table.columns):
+                    svg = ceph_treemap.render(table.to_dict("records"))
+                    if svg:
+                        st.markdown(svg, unsafe_allow_html=True)
+                        st.caption(ceph_treemap.caption(table.to_dict("records")))
+                st.dataframe(table, use_container_width=True)
 
             with st.expander("Debug: agent reasoning"):
                 st.write(f"Path taken: {result.get('complexity', 'unknown')}")
