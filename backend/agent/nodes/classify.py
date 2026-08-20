@@ -3,7 +3,7 @@ from langchain_groq import ChatGroq
 from agent.state import AgentState
 from agent.tool_registry import TOOL_REGISTRY
 from agent.history import recent_turns
-from agent import streaming, clarify
+from agent import streaming, clarify, telemetry
 
 from agent.models import FAST_MODEL
 
@@ -69,11 +69,12 @@ def _classify_node_impl(state: AgentState) -> AgentState:
 
     # A follow-up ("and server02?") is unroutable on its own — the system it
     # belongs to lives in the previous turn.
-    response = client.invoke(
-        [{"role": "system", "content": prompt}]
-        + recent_turns(state.get("conversation_history"), max_turns=4)
-        + [{"role": "user", "content": state["question"]}]
-    )
+    with telemetry.measure("classify", CLASSIFY_MODEL) as call:
+        call.response = response = client.invoke(
+            [{"role": "system", "content": prompt}]
+            + recent_turns(state.get("conversation_history"), max_turns=4)
+            + [{"role": "user", "content": state["question"]}]
+        )
 
     try:
         parsed = json.loads(response.content)

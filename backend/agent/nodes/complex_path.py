@@ -5,7 +5,7 @@ from agent.tool_registry import TOOL_REGISTRY
 from agent.tool_schemas import TOOL_SCHEMAS
 from agent.metadata import fetch_live_metadata
 from agent.arg_guard import scrub
-from agent import streaming, clarify, coverage
+from agent import streaming, clarify, coverage, telemetry
 from agent.voice import (CONVERSATIONAL_STYLE, CONVERSATIONAL_STYLE_BRIEF,
                          system_for_tools)
 
@@ -127,7 +127,9 @@ def _complex_path_node_impl(state: AgentState) -> AgentState:
     while tool_call_count < MAX_TOOL_CALLS:
         try:
             response = streaming.stream_with_tools(
-                client.bind_tools(TOOL_SCHEMAS), messages)
+                client.bind_tools(TOOL_SCHEMAS), messages,
+                operation="orchestrate", model=REASONING_MODEL,
+                detail=f"step {tool_call_count + 1}")
         except Exception as exc:
             # The model sometimes emits a tool call Groq cannot parse. That is a
             # bad generation, not a bad question — retry once, and if it happens

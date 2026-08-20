@@ -230,6 +230,57 @@ if user_input:
                         st.caption(ceph_treemap.caption(table.to_dict("records")))
                 st.dataframe(table, use_container_width=True)
 
+            # Where this question's tokens went. Shown under every answer rather
+            # than hidden in the debug panel: the models are capped per minute,
+            # so the cost of the question just asked is operational information.
+            telemetry = result.get("telemetry") or {}
+            if telemetry.get("served_from_cache"):
+                st.caption(
+                    f"🎫 0 tokens — served from cache "
+                    f"(cost {telemetry.get('original_total_tokens', 0):,} when first asked)")
+            elif telemetry.get("calls"):
+                budget = telemetry.get("minute_budget_pct", 0)
+                st.caption(
+                    f"🎫 {telemetry['total_tokens']:,} tokens · "
+                    f"{budget:.0f}% of a minute's allowance · "
+                    f"{telemetry['model_calls']} model call(s) · "
+                    f"{telemetry['seconds']:.1f}s"
+                    + ("  ⚠️ over one minute's budget" if budget > 100 else ""))
+
+                with st.expander("Token breakdown"):
+                    st.markdown("**Where the tokens went**")
+                    st.dataframe(pd.DataFrame([
+                        {"Operation": e["label"], "Calls": e["calls"],
+                         "Tokens": e["total_tokens"], "Share": f"{e['share_pct']}%"}
+                        for e in telemetry.get("by_operation", [])
+                    ]), use_container_width=True, hide_index=True)
+
+                    st.markdown("**Every call**")
+                    st.dataframe(pd.DataFrame([
+                        {"Operation": c["operation"], "Detail": c["detail"] or "—",
+                         "Model": str(c["model"]).split("/")[-1],
+                         "In": c["input_tokens"], "Out": c["output_tokens"],
+                         "Thinking": c["reasoning_tokens"],
+                         "Total": c["total_tokens"], "Seconds": c["seconds"]}
+                        for c in telemetry["calls"]
+                    ]), use_container_width=True, hide_index=True)
+
+                    reasoning = telemetry.get("reasoning_tokens", 0)
+                    output = telemetry.get("output_tokens", 0)
+                    if reasoning:
+                        st.caption(
+                            f"{reasoning:,} of {output:,} output tokens "
+                            f"({reasoning / output * 100:.0f}%) were reasoning — the "
+                            f"model thinking before it answered. That work is billed "
+                            f"but never appears in the reply.")
+                    if telemetry.get("unmeasured_calls"):
+                        st.warning(
+                            f"{len(telemetry['unmeasured_calls'])} call(s) returned no "
+                            f"usage figures, so the total above is a minimum: "
+                            f"{', '.join(telemetry['unmeasured_calls'])}", icon="⚠️")
+                    st.caption("Figures come from Groq's own usage reporting, "
+                               "not an estimate.")
+
             with st.expander("Debug: agent reasoning"):
                 st.write(f"Path taken: {result.get('complexity', 'unknown')}")
                 st.write(f"Tools called: {result.get('tools_called', [])}")

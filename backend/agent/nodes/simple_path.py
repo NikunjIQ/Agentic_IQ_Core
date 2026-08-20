@@ -7,7 +7,7 @@ from agent.tool_schemas import TOOL_SCHEMAS
 from agent.metadata import fetch_live_metadata
 from agent.history import recent_turns
 from agent.arg_guard import scrub
-from agent import streaming, clarify, coverage
+from agent import streaming, clarify, coverage, telemetry
 from agent.voice import CONVERSATIONAL_STYLE, system_for_tools
 
 from agent.models import FAST_MODEL, REASONING_MODEL
@@ -57,7 +57,9 @@ def _simple_path_node_impl(state: AgentState) -> AgentState:
         for model in (FAST_MODEL, SYNTHESIS_MODEL):
             try:
                 client = ChatGroq(model=model, temperature=0)
-                response = client.bind_tools([tool_schema], tool_choice=tool_name).invoke(messages)
+                with telemetry.measure("extract", model, tool_name) as call:
+                    call.response = response = client.bind_tools(
+                        [tool_schema], tool_choice=tool_name).invoke(messages)
                 if response.tool_calls:
                     tool_args = response.tool_calls[0]["args"]
                     extracted = True
@@ -123,7 +125,9 @@ def _simple_path_node_impl(state: AgentState) -> AgentState:
 
     streaming.status("Writing the answer…")
     client = ChatGroq(model=SYNTHESIS_MODEL, temperature=0)
-    state["final_answer"] = streaming.stream_text(client,
+    state["final_answer"] = streaming.stream_text(
+        client, operation="synthesise", model=SYNTHESIS_MODEL, detail=tool_name,
+        messages=
         [{"role": "system", "content":
             f"You are IQCore, an IT operations assistant. Current Date: {current_date}. "
             f"Answer the user's question accurately using the tool result provided. "

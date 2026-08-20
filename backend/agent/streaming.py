@@ -14,10 +14,14 @@ that thread so the nodes can find it without threading it through the state.
 import contextlib
 import contextvars
 import queue
+import time
 
 _current = contextvars.ContextVar("iqcore_emitter", default=None)
 
 DONE = object()
+
+# Sentinel for a stream whose chunks could not be combined.
+_UNMERGEABLE = object()
 
 
 class Emitter:
@@ -90,25 +94,45 @@ def node(name: str):
         emitter.node(name, "exit")
 
 
-def stream_text(client, messages):
+def stream_text(client, messages, operation="synthesise", model="", detail=""):
     """Yield an answer token by token when streaming, in one call when not.
 
     Returns the complete text either way, so callers do not need two code paths.
+
+    Chunks are summed even when only the text is wanted, because the merged
+    message is what carries usage_metadata — Groq reports token usage on the
+    stream, but only once the chunks are combined.
     """
+    from agent import telemetry
     emitter = _current.get()
+    started = time.time()
+
     if emitter is None:
-        return client.invoke(messages).content
+        response = client.invoke(messages)
+        telemetry.note(operation, model, response, time.time() - started, detail)
+        return response.content
 
     parts = []
+    merged = None
     for chunk in client.stream(messages):
+        # Usage only appears on the merged message, but merging must never cost
+        # the answer: a chunk type that cannot be added leaves the call
+        # unmeasured rather than raising mid-stream.
+        if merged is not _UNMERGEABLE:
+            try:
+                merged = chunk if merged is None else merged + chunk
+            except Exception:
+                merged = _UNMERGEABLE
         piece = getattr(chunk, "content", "") or ""
         if piece:
             parts.append(piece)
             emitter.token(piece)
+    telemetry.note(operation, model, None if merged is _UNMERGEABLE else merged,
+                   time.time() - started, detail)
     return "".join(parts)
 
 
-def stream_with_tools(client, messages):
+def stream_with_tools(client, messages, operation="orchestrate", model="", detail=""):
     """Stream a call that may return either tool calls or a final answer.
 
     The model decides mid-generation which it is doing, so chunks are summed
@@ -116,14 +140,23 @@ def stream_with_tools(client, messages):
     live. When the model chooses a tool, nothing is shown — correctly, since
     there is no answer text yet.
     """
+    from agent import telemetry
     emitter = _current.get()
+    started = time.time()
+
     if emitter is None:
-        return client.invoke(messages)
+        response = client.invoke(messages)
+        telemetry.note(operation, model, response, time.time() - started, detail)
+        return response
 
     merged = None
     for chunk in client.stream(messages):
+        # Here the merge is load-bearing — tool_calls are only recoverable from
+        # the combined message — so a failure propagates rather than being
+        # swallowed, unlike in stream_text where only usage would be lost.
         merged = chunk if merged is None else merged + chunk
         piece = getattr(chunk, "content", "") or ""
         if piece:
             emitter.token(piece)
+    telemetry.note(operation, model, merged, time.time() - started, detail)
     return merged

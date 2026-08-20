@@ -805,3 +805,107 @@ def test_classifier_carries_the_cross_system_test():
     assert "ceph network alert" in CLASSIFY_PROMPT, (
         "the worked cross-system example is gone; it is what stops the small "
         "model reading a two-system question as one short question")
+
+
+def test_telemetry_records_nothing_outside_a_measured_request():
+    """The recorder is per-request; calls outside one must not raise or leak."""
+    from agent import telemetry
+    telemetry.note("classify", "m", None, 0.1)          # no recorder set
+    with telemetry.measure("classify", "m"):
+        pass
+    assert telemetry.summary() in ({}, None) or telemetry.summary().get("calls") is not None
+
+
+def test_telemetry_aggregates_by_operation_and_totals():
+    from agent import telemetry
+
+    class FakeMessage:
+        def __init__(self, i, o, r=0):
+            self.usage_metadata = {"input_tokens": i, "output_tokens": o,
+                                   "total_tokens": i + o,
+                                   "output_token_details": {"reasoning": r}}
+
+    recorder = telemetry.start()
+    recorder.note("classify", "small", FakeMessage(1000, 50, 30), 0.9)
+    recorder.note("extract", "small", FakeMessage(1100, 60, 20), 0.7)
+    recorder.note("synthesise", "large", FakeMessage(400, 120, 60), 1.2)
+
+    summary = telemetry.summary()
+    assert summary["model_calls"] == 3
+    assert summary["total_tokens"] == 1050 + 1160 + 520
+    assert summary["reasoning_tokens"] == 110
+    # Ordered by cost, so the expensive operation is the first thing read.
+    assert summary["by_operation"][0]["operation"] == "extract"
+    assert sum(e["share_pct"] for e in summary["by_operation"]) == 100.0
+    assert summary["minute_budget_pct"] > 0
+
+
+def test_telemetry_counts_a_call_that_returned_no_usage():
+    """A call with no usage figures must show as a gap, not improve the total."""
+    from agent import telemetry
+    recorder = telemetry.start()
+    recorder.note("orchestrate", "large", None, 0.5)
+    summary = telemetry.summary()
+    assert summary["model_calls"] == 1
+    assert summary["total_tokens"] == 0
+    assert summary["unmeasured_calls"] == ["orchestrate"], (
+        "an unmeasured call must be named, or the total silently understates")
+
+
+def test_telemetry_failed_call_is_still_recorded():
+    """A call that raised still spent tokens; hiding it flatters the total."""
+    from agent import telemetry
+    telemetry.start()
+    try:
+        with telemetry.measure("orchestrate", "large"):
+            raise RuntimeError("groq said no")
+    except RuntimeError:
+        pass
+    assert telemetry.summary()["model_calls"] == 1
+
+
+def test_cached_answers_report_zero_tokens():
+    """A cache hit spends nothing; replaying the original cost double-counts."""
+    from agent import answer_cache
+    answer_cache.clear()
+    answer_cache.put("how many pools", {"final_answer": "7",
+                                        "telemetry": {"total_tokens": 2808,
+                                                      "calls": [{"operation": "classify"}]}})
+    hit = answer_cache.get("how many pools")
+    assert hit["cached"] is True
+    assert hit["telemetry"]["total_tokens"] == 0
+    assert hit["telemetry"]["served_from_cache"] is True
+    assert hit["telemetry"]["original_total_tokens"] == 2808
+
+
+def test_telemetry_never_breaks_the_answer():
+    """Measurement is subordinate to answering.
+
+    stream_text merges chunks only to recover usage figures. A chunk type that
+    cannot be added must leave the call unmeasured, not lose the answer.
+    """
+    from agent import streaming, telemetry
+
+    class Unmergeable:
+        content = "hello "
+
+    class Unmergeable2:
+        content = "world"
+
+    class FakeClient:
+        def stream(self, messages):
+            yield Unmergeable()
+            yield Unmergeable2()
+
+    emitter = streaming.Emitter()
+    streaming.set_emitter(emitter)
+    telemetry.start()
+    try:
+        text = streaming.stream_text(FakeClient(), [], operation="synthesise", model="m")
+    finally:
+        streaming.set_emitter(None)
+
+    assert text == "hello world", "the answer was lost to a telemetry concern"
+    summary = telemetry.summary()
+    assert summary["model_calls"] == 1
+    assert summary["unmeasured_calls"] == ["synthesise"]

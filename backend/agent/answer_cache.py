@@ -71,6 +71,20 @@ def get(question: str, conversation_history=None, ttl: int = None):
             payload = dict(entry["payload"])
             payload["cached"] = True
             payload["cache_age_seconds"] = round(now - entry["stored_at"], 1)
+            # A cache hit spends no tokens. Replaying the original question's
+            # telemetry would bill this answer twice in the running total and
+            # make the cache look useless, so the figures are zeroed and the
+            # original cost kept as context.
+            original = payload.get("telemetry") or {}
+            if original:
+                payload["telemetry"] = {
+                    "calls": [], "by_operation": [], "model_calls": 0,
+                    "input_tokens": 0, "output_tokens": 0, "reasoning_tokens": 0,
+                    "total_tokens": 0, "seconds": 0.0, "minute_budget_pct": 0.0,
+                    "unmeasured_calls": [],
+                    "served_from_cache": True,
+                    "original_total_tokens": original.get("total_tokens", 0),
+                }
             return payload
         if entry:
             _entries.pop(key, None)

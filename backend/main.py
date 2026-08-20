@@ -12,7 +12,8 @@ import pandas as pd
 import numpy as np
 
 from agent.graph import COMPILED_GRAPH
-from agent import answer_cache, config_store, config_test, streaming, suggestions
+from agent import (answer_cache, config_store, config_test, streaming,
+                   suggestions, telemetry)
 
 load_dotenv()
 
@@ -95,6 +96,7 @@ async def chat(request: ChatRequest):
         "tools_called": [],
         "final_answer": None,
     }
+    telemetry.start()
     try:
         result_state = COMPILED_GRAPH.invoke(initial_state)
     except Exception as exc:
@@ -138,6 +140,8 @@ def _serialise_state(result_state: dict) -> dict:
         # Deterministic follow-ups — no model call, so these are free.
         "suggestions": suggestions.suggest(
             tools_called, suggestions.looks_empty(serialized_dfs, raw)),
+        # Where this question's tokens went, straight from Groq's usage figures.
+        "telemetry": telemetry.summary(),
     }
 
     try:
@@ -181,6 +185,7 @@ async def chat_stream(request: ChatRequest):
 
         def run():
             streaming.set_emitter(emitter)          # inside the thread it will run in
+            telemetry.start()                       # same reason: contextvars are per-thread
             try:
                 state = COMPILED_GRAPH.invoke({
                     "question": request.question,
