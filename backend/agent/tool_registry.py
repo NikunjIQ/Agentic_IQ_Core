@@ -37,13 +37,15 @@ ROUTING_SUMMARIES = {
     ),
     "query_zammad": (
         "Zammad helpdesk. Tickets only — counts, states, priorities, agents, "
-        "organisations, SLA and response times, tags, group_by breakdowns."
+        "organisations, SLA and response times, tags, free-text search, named "
+        "queues, booked time, one ticket's conversation, group_by breakdowns."
     ),
     "query_prometheus": (
         "Prometheus. The Linux cluster server01/02/03, OpenStack, VMs and "
         "containers — a different estate from Zabbix. CPU, memory, disk, load, "
-        "uptime, network, scrape targets, OpenStack routers/networks/volumes, "
-        "raw PromQL."
+        "uptime, network, scrape targets, OpenStack routers/networks, and Cinder "
+        "volume/snapshot COUNTS from the OpenStack exporter — the RBD snapshots "
+        "themselves are Ceph. Raw PromQL."
     ),
     "query_opensearch": (
         "OpenSearch. OpenStack application logs only (flog-*). Holds nothing "
@@ -56,9 +58,11 @@ ROUTING_SUMMARIES = {
     ),
     "query_ceph": (
         "Ceph storage cluster. The disks UNDER OpenStack: capacity and free space, "
-        "pools (Cinder volumes, Glance images, Nova VM disks, backups), OSDs, RBD "
-        "images, cluster health and storage alerts. Prometheus watches VM CPU and "
-        "memory; Ceph watches the storage beneath them. Not a source of VM counts."
+        "pools (Cinder volumes, Glance images, Nova VM disks, backups), OSDs and "
+        "disk failures, RBD images and their SNAPSHOTS, CephFS and MDS, CRUSH rules "
+        "and replication, cluster hosts, cluster logs, health and storage alerts. "
+        "Prometheus watches VM CPU and memory; Ceph watches the storage beneath "
+        "them. Not a source of VM counts."
     ),
     "lookup_ticket_context": (
         "The reverse join: from a Zammad ticket id back to the device and the "

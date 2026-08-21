@@ -114,6 +114,43 @@ def looks_ambiguous(question: str) -> bool:
     return not _ANCHOR.search(str(question or ""))
 
 
+# Vocabulary that belongs to exactly ONE system. The classifier is a small model
+# and over-asks in the other direction from looks_ambiguous: "Give me the
+# snapshot details" is an official Ceph question, and it was coming back as
+# "which system did you mean?" because no system is named in the sentence.
+# Nothing here may be a word two systems could claim — an ambiguous term must
+# fall through to the question, not be resolved by a coin toss.
+_TOOL_WORDS = {
+    "query_ceph": ("ceph", "cephfs", "osds?", "rbd", "crush", "mds",
+                   "snapshots?", "replicas?", "replication", "pools?"),
+    "query_zabbix": ("zabbix", "snmp", "triggers?", "icmp"),
+    "query_zammad": ("zammad", "tickets?", "helpdesk", "queues?"),
+    "query_prometheus": ("prometheus", "promql", "scrapes?", "exporters?",
+                         "containers?"),
+    "query_opensearch": ("opensearch", "flog"),
+}
+
+# Compiled from the word lists rather than written out by hand, so the word
+# boundaries cannot go missing: a routing rule that fires on a substring is
+# worse than no rule at all.
+_TOOL_VOCABULARY = tuple(
+    (name, re.compile(r"\b(?:" + "|".join(words) + r")\b", re.IGNORECASE))
+    for name, words in _TOOL_WORDS.items()
+)
+
+
+def resolves_to_one_tool(question: str) -> str:
+    """The single tool this question's vocabulary names, or "".
+
+    A ceiling over the model's judgement, the counterpart to looks_ambiguous.
+    Returns "" when two systems' words both appear — that is real ambiguity and
+    belongs in a question to the user, or in the complex path.
+    """
+    text = str(question or "")
+    matched = {name for name, pattern in _TOOL_VOCABULARY if pattern.search(text)}
+    return matched.pop() if len(matched) == 1 else ""
+
+
 def normalise_axis(value) -> str:
     """Accept only a known axis; anything else means 'do not ask'."""
     text = str(value or "").strip().lower()

@@ -27,7 +27,9 @@ Given a user's question, decide:
             "is anyone working on the disk space problem" (Zabbix + Zammad),
             "which VM is slow and is it logging errors" (Prometheus + OpenSearch).
    SIMPLE:  "how many tickets are open" (Zammad alone),
-            "is ceph healthy" (Ceph alone).
+            "is ceph healthy" (Ceph alone),
+            "how many OSDs are up" (Ceph alone — a storage object names its
+            system just as surely as the word Ceph does).
 
 Available tools:
 {tool_descriptions}
@@ -45,8 +47,10 @@ Available tools:
    "show me the status" — no system, device, or object type is mentioned.
 
    Set it to null whenever the question names ANY of: a system (Zabbix, Prometheus,
-   Zammad, OpenSearch), an object type (hosts, tickets, VMs, logs, containers),
-   a device or IP, a host group, or a metric (CPU, memory, disk).
+   Zammad, OpenSearch, Ceph), an object type (hosts, tickets, VMs, logs, containers,
+   pools, OSDs, RBD images, snapshots, CephFS), a device or IP, a host group, or a
+   metric (CPU, memory, disk). An object type names its system implicitly — only
+   Ceph has snapshots and OSDs, so "give me the snapshot details" is NOT ambiguous.
    Also null if the previous assistant message was a clarifying question — the
    user is answering it, not asking something new.
 
@@ -98,6 +102,18 @@ def _classify_node_impl(state: AgentState) -> AgentState:
     # catches the plainly vague cases whatever the model decided.
     elif not axis and clarify.looks_ambiguous(state["question"])             and not clarify.was_just_asked(state.get("conversation_history")):
         axis = "system"
+    # And a ceiling over it, in the other direction. The same small model also
+    # over-asks: "Give me the snapshot details" is an official Ceph question and
+    # came back as "which system did you mean?", because no system is named in
+    # the sentence even though only one owns the word "snapshot". When the
+    # question's vocabulary belongs to exactly one system, that is not ambiguity
+    # — and a question naming two systems still falls through to the ask.
+    if axis and not state.get("simple_tool_choice"):
+        resolved = clarify.resolves_to_one_tool(state["question"])
+        if resolved:
+            state["simple_tool_choice"] = resolved
+            state["complexity"] = "simple"
+            axis = ""
     state["clarify_axis"] = axis
 
     return state

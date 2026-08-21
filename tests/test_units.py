@@ -909,3 +909,56 @@ def test_telemetry_never_breaks_the_answer():
     summary = telemetry.summary()
     assert summary["model_calls"] == 1
     assert summary["unmeasured_calls"] == ["synthesise"]
+
+
+def test_storage_vocabulary_names_its_system():
+    """The classifier over-asked on questions only one system could own.
+
+    "Give me the snapshot details" is an official Ceph question and came back as
+    "which system did you mean?", because no system is named in the sentence.
+    Only Ceph has snapshots, OSDs and pools, so that is not ambiguity — this is
+    the ceiling over the model's judgement, mirroring looks_ambiguous below it.
+    """
+    from agent import clarify
+    for question in ("Give me the snapshot details", "show me the osds",
+                     "how full are the pools", "is the rbd image there"):
+        assert clarify.resolves_to_one_tool(question) == "query_ceph", question
+    assert clarify.resolves_to_one_tool("how many tickets are open") == "query_zammad"
+
+
+def test_two_systems_named_still_falls_through_to_the_question():
+    """Resolving must never break the tie when the tie is real."""
+    from agent import clarify
+    for question in ("how many snapshots and how many tickets?",
+                     "is there a ticket for the ceph alert"):
+        assert clarify.resolves_to_one_tool(question) == "", question
+    # Nothing routable at all stays unrouted.
+    assert clarify.resolves_to_one_tool("is it down?") == ""
+
+
+def test_vocabulary_matches_whole_words_only():
+    """A routing rule that fires on a substring is worse than no rule.
+
+    The word boundaries were lost once already — \b is a valid string escape and
+    became a backspace character, leaving a pattern that silently matched nothing.
+    """
+    from agent import clarify
+    assert clarify.resolves_to_one_tool("liverpool are playing") == ""
+    assert clarify.resolves_to_one_tool("the whirlpool broke") == ""
+    assert clarify.resolves_to_one_tool("how many pools are there") == "query_ceph"
+
+
+def test_router_can_see_every_system_its_tools_answer_for():
+    """Routing summaries are matching hooks for the model, not documentation.
+
+    Compressing them for tokens dropped half of Ceph's surface: "snapshot" did
+    not appear anywhere the classifier could see it, so snapshot questions were
+    routed to Zabbix or fell through to the complex path.
+    """
+    from agent.tool_registry import ROUTING_SUMMARIES
+    ceph = ROUTING_SUMMARIES["query_ceph"].lower()
+    for word in ("snapshot", "cephfs", "crush", "osd", "pool", "host", "log"):
+        assert word in ceph, f"router cannot see Ceph {word}"
+    zammad = ROUTING_SUMMARIES["query_zammad"].lower()
+    for word in ("search", "queue", "conversation"):
+        assert word in zammad, f"router cannot see Zammad {word}"
