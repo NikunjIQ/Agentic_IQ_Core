@@ -30,12 +30,24 @@ SUITES = [
 GREEN, RED, YELLOW, DIM, RESET = "\033[32m", "\033[31m", "\033[33m", "\033[2m", "\033[0m"
 
 
-def run_suite(label: str, module_name: str, pattern: str):
+def run_suite(label: str, module_name: str, pattern: str, with_llm: bool = False):
     module = importlib.import_module(module_name)
     tests = sorted(name for name in dir(module)
                    if name.startswith("test_") and callable(getattr(module, name)))
     if pattern:
         tests = [t for t in tests if pattern.lower() in t.lower()]
+
+    # A tier that advertises "no network" must not quietly spend tokens. A
+    # module names its own exceptions, and they are held back unless --llm:
+    # when the daily budget is gone, a model call fails in a way that reads as
+    # a code regression, which is how it went unnoticed here.
+    costly = set(getattr(module, "SPENDS_TOKENS", ()))
+    if costly and not with_llm:
+        held = [t for t in tests if t in costly]
+        tests = [t for t in tests if t not in costly]
+        if held:
+            print(f"  {DIM}{len(held)} test(s) held back — they call models"
+                  f" (pass --llm to include){RESET}")
 
     passed, failed = 0, []
     for name in tests:
@@ -95,7 +107,7 @@ def main():
             continue
 
         print(f"\n== {label} [{module_name}]")
-        passed, failed = run_suite(label, module_name, args.pattern)
+        passed, failed = run_suite(label, module_name, args.pattern, args.llm)
         total_passed += passed
         total_failed += failed
 

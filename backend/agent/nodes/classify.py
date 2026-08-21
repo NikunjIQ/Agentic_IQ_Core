@@ -78,6 +78,76 @@ Respond with ONLY a JSON object, no other text:
 }}
 """
 
+def _route_schema() -> dict:
+    """The shape a routing decision must have, built from the live registry.
+
+    Argument extraction forces its schema with tool_choice; classification
+    parsed free text and fell into `except` on anything unexpected, quietly
+    becoming "complex" with no tool. Two failures hid in there: a malformed
+    reply read as an expensive question rather than an error, and an invented
+    tool name — nothing checked the string against the registry — reached
+    simple_path, which found no such tool and asked the user which system they
+    meant. Enumerating the names here makes both impossible to express.
+    """
+    return {
+        "type": "function",
+        "function": {
+            "name": "route",
+            "description": "Record where this question should go.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "complexity": {
+                        "type": "string", "enum": ["simple", "complex"],
+                        "description": "How many systems hold the facts, not "
+                                       "how confident you are."},
+                    "tool": {
+                        "type": "string",
+                        "enum": sorted(TOOL_REGISTRY) + ["none"],
+                        "description": "The one tool that answers it, or 'none' "
+                                       "when the question spans two systems."},
+                    "ambiguous": {
+                        "type": "string",
+                        "enum": ["system", "scope", "timeframe", "none"],
+                        "description": "'none' unless the question names nothing "
+                                       "at all to route on."},
+                },
+                "required": ["complexity", "tool", "ambiguous"],
+            },
+        },
+    }
+
+
+def _read_decision(response) -> tuple:
+    """(complexity, tool, axis) from a forced call, or from loose JSON.
+
+    The JSON branch is kept for the case where tool_choice is refused, so a
+    provider quirk degrades to the old behaviour instead of failing the
+    request. Returns None when neither shape is readable, which the caller
+    reports rather than swallows.
+    """
+    calls = getattr(response, "tool_calls", None) or []
+    if calls:
+        args = calls[0].get("args") or {}
+    else:
+        try:
+            args = json.loads(getattr(response, "content", "") or "")
+        except (json.JSONDecodeError, TypeError):
+            return None
+    if not isinstance(args, dict):
+        return None
+
+    tool = args.get("tool")
+    if tool in ("none", "null", ""):
+        tool = None
+    # The enum makes this unreachable on the forced path; the JSON fallback has
+    # no such guarantee, and an unknown name costs the user an answer.
+    if tool is not None and tool not in TOOL_REGISTRY:
+        tool = None
+    return (args.get("complexity") or "complex", tool,
+            clarify.normalise_axis(args.get("ambiguous")))
+
+
 def _classify_node_impl(state: AgentState) -> AgentState:
     streaming.status("Working out which system to check…")
     client = ChatGroq(model=CLASSIFY_MODEL, temperature=0)
@@ -93,23 +163,26 @@ def _classify_node_impl(state: AgentState) -> AgentState:
 
     # A follow-up ("and server02?") is unroutable on its own — the system it
     # belongs to lives in the previous turn.
-    with telemetry.measure("classify", CLASSIFY_MODEL) as call:
-        call.response = response = client.invoke(
-            [{"role": "system", "content": prompt}]
-            + recent_turns(state.get("conversation_history"), max_turns=4)
-            + [{"role": "user", "content": state["question"]}]
-        )
+    messages = ([{"role": "system", "content": prompt}]
+                + recent_turns(state.get("conversation_history"), max_turns=4)
+                + [{"role": "user", "content": state["question"]}])
 
-    try:
-        parsed = json.loads(response.content)
-        state["complexity"] = parsed.get("complexity", "complex")
-        state["simple_tool_choice"] = parsed.get("tool")
-        axis = clarify.normalise_axis(parsed.get("ambiguous"))
-    except (json.JSONDecodeError, AttributeError):
-        # fail safe into the complex path rather than guessing — see Section 3's rationale
-        state["complexity"] = "complex"
-        state["simple_tool_choice"] = None
-        axis = ""
+    decision = None
+    with telemetry.measure("classify", CLASSIFY_MODEL) as call:
+        call.response = response = client.bind_tools(
+            [_route_schema()], tool_choice="route").invoke(messages)
+    decision = _read_decision(response)
+
+    if decision is None:
+        # Still fail safe into the complex path, but say so. This used to be
+        # silent, so a prompt change that broke parsing would show up as every
+        # question suddenly costing several times as much, with no error to
+        # explain it.
+        streaming.status("Could not read the routing decision — checking more "
+                         "than one system to be safe")
+        decision = ("complex", None, "")
+
+    state["complexity"], state["simple_tool_choice"], axis = decision
 
     # Never ask twice in a row. If the previous turn was already a clarifying
     # question, this message is the answer to it — asking again would trap the

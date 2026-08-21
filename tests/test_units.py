@@ -1,12 +1,21 @@
 """Offline tests: wiring, the answer cache, and conversation history.
 
-No network and no LLM, so these run in milliseconds and cost nothing. They are
-the tests that should never be skipped.
+No network, and no LLM except where SPENDS_TOKENS says otherwise, so these run
+in milliseconds and cost nothing. They are the tests that should never be
+skipped.
 """
 
 import time
 
 import conftest  # noqa: F401  (path + env bootstrap)
+
+# This module is the free tier and must stay free. Anything named here calls
+# a model, so run_evals holds it back unless --llm is passed.
+# test_every_graph_node_announces_itself invokes the compiled graph, which
+# runs classify and simple_path for real. It spent part of the daily budget
+# on every "offline" run, and once that budget was gone it failed in a way
+# that read as a routing regression rather than an exhausted quota.
+SPENDS_TOKENS = {"test_every_graph_node_announces_itself"}
 
 
 # --- wiring -----------------------------------------------------------------
@@ -1101,3 +1110,58 @@ def test_anchor_words_cover_the_storage_vocabulary():
     for word in ("snapshots", "pools", "osds", "cephfs", "crush", "tickets",
                  "containers", "logs", "hosts"):
         assert word in words, f"anchor words missing {word!r}"
+
+
+def test_route_schema_only_allows_real_tool_names():
+    """An invented tool name cost the user an answer, silently.
+
+    Nothing checked the string the classifier returned against the registry.
+    simple_path looked it up, found nothing, and asked which system was meant —
+    indistinguishable from a genuinely vague question. The schema enumerates
+    the names, so the wrong one cannot be expressed.
+    """
+    from agent.nodes.classify import _route_schema
+    from agent.tool_registry import TOOL_REGISTRY
+    properties = _route_schema()["function"]["parameters"]["properties"]
+    assert set(properties["tool"]["enum"]) == set(TOOL_REGISTRY) | {"none"}
+    assert properties["complexity"]["enum"] == ["simple", "complex"]
+    assert "none" in properties["ambiguous"]["enum"]
+
+
+class _Reply:
+    def __init__(self, content="", tool_calls=None):
+        self.content = content
+        self.tool_calls = tool_calls or []
+
+
+def test_routing_decision_is_read_from_the_forced_call():
+    from agent.nodes.classify import _read_decision
+    reply = _Reply(tool_calls=[{"name": "route", "args": {
+        "complexity": "simple", "tool": "query_ceph", "ambiguous": "none"}}])
+    assert _read_decision(reply) == ("simple", "query_ceph", "")
+
+
+def test_routing_decision_falls_back_to_loose_json():
+    """Kept so a provider refusing tool_choice degrades instead of failing."""
+    from agent.nodes.classify import _read_decision
+    reply = _Reply(content='{"complexity":"complex","tool":null,"ambiguous":"system"}')
+    assert _read_decision(reply) == ("complex", None, "system")
+
+
+def test_an_unknown_tool_name_never_reaches_the_router():
+    from agent.nodes.classify import _read_decision
+    reply = _Reply(content='{"complexity":"simple","tool":"query_splunk","ambiguous":"none"}')
+    complexity, tool, axis = _read_decision(reply)
+    assert tool is None, "an unregistered tool name must not be routed to"
+
+
+def test_unreadable_routing_output_is_reported_not_swallowed():
+    """It became "complex" with no tool and no error.
+
+    A prompt change that broke parsing would have read as every question
+    suddenly costing several times more, with nothing to explain it.
+    """
+    from agent.nodes.classify import _read_decision
+    assert _read_decision(_Reply(content="I think this is a Zabbix question")) is None
+    assert _read_decision(_Reply(content="")) is None
+    assert _read_decision(_Reply(content='["not", "an", "object"]')) is None
