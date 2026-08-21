@@ -962,3 +962,53 @@ def test_router_can_see_every_system_its_tools_answer_for():
     zammad = ROUTING_SUMMARIES["query_zammad"].lower()
     for word in ("search", "queue", "conversation"):
         assert word in zammad, f"router cannot see Zammad {word}"
+
+
+def test_routing_corpus_covers_every_system():
+    """A routing score that ignores a system cannot catch it being misrouted.
+
+    Zammad, Prometheus and OpenSearch had no natural-language questions at all
+    before this — only internal labels like "opened last 10 days", which nobody
+    would type — so a corpus built from golden_queries alone would have scored
+    two systems out of five.
+    """
+    import routing_cases
+    from agent.tool_registry import TOOL_REGISTRY
+
+    covered = {tool for _, tool, _ in routing_cases.ROUTING_CASES if tool}
+    for tool in ("query_ceph", "query_zabbix", "query_zammad",
+                 "query_prometheus", "query_opensearch"):
+        assert tool in covered, f"no routing cases for {tool}"
+
+    for question, tool, complexity in routing_cases.ROUTING_CASES:
+        assert tool is None or tool in TOOL_REGISTRY, f"{question}: unknown {tool}"
+        assert complexity in ("simple", "complex"), f"{question}: {complexity}"
+
+
+def test_routing_corpus_has_no_duplicate_questions():
+    """The same question scored twice weights it twice and hides the rest."""
+    import routing_cases
+    questions = [q for q, _, _ in routing_cases.ROUTING_CASES]
+    duplicates = {q for q in questions if questions.count(q) > 1}
+    assert not duplicates, f"duplicated: {duplicates}"
+
+
+def test_collision_cases_prefer_something_they_accept():
+    """A preferred answer outside the accepted set is a typo, not a decision."""
+    import routing_cases
+    for question, accepted, preferred in routing_cases.COLLISION_CASES:
+        assert len(accepted) > 1, f"{question}: not a collision"
+        assert preferred in accepted, f"{question}: prefers {preferred}, not in {accepted}"
+
+
+def test_vague_questions_are_caught_without_a_model():
+    """The deterministic floor should hold these on its own.
+
+    If looks_ambiguous already catches them, a classifier that answers them
+    anyway is overriding code that was right — worth knowing separately from
+    the model simply being wrong.
+    """
+    from agent import clarify
+    import routing_cases
+    for question in routing_cases.SHOULD_ASK:
+        assert clarify.looks_ambiguous(question), f"floor missed: {question!r}"

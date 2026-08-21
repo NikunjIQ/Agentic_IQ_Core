@@ -4,6 +4,7 @@
     python tests/run_evals.py              # offline + live tools (no token cost)
     python tests/run_evals.py --offline    # offline only, no network
     python tests/run_evals.py --llm        # everything, including extraction evals
+    python tests/run_evals.py --routing    # score which system each question routes to
     python tests/run_evals.py -k traffic   # only tests whose name matches
 
 Every test is a plain `test_*` function using bare asserts, so `pytest tests/`
@@ -64,7 +65,23 @@ def main():
     parser.add_argument("-k", dest="pattern", default="",
                         help="only run tests whose name contains this")
     parser.add_argument("--traceback", action="store_true", help="full tracebacks")
-    args = parser.parse_args()
+    parser.add_argument("--routing", action="store_true",
+                        help="score the classify node instead of running tests "
+                             "(spends tokens; see tests/score_routing.py for "
+                             "--only and --limit)")
+    # Unknown arguments are kept rather than rejected so --routing can forward
+    # --only and --limit to the scorer; a full routing run is ~93 model calls,
+    # so narrowing it is the normal case, not an edge one.
+    args, passthrough = parser.parse_known_args()
+
+    if args.routing:
+        # Routing is scored, not passed or failed: the useful output is a
+        # percentage and the questions that went to the wrong system.
+        import score_routing
+        sys.argv = [sys.argv[0]] + passthrough
+        return score_routing.main()
+    if passthrough:
+        parser.error(f"unrecognized arguments: {' '.join(passthrough)}")
 
     total_passed, total_failed = 0, []
     started = time.time()
