@@ -259,11 +259,16 @@ error, and only an eval catches that.
 
 ## Known constraints
 
-**Groq's per-minute cap is the binding limit.** The gpt-oss models allow **8,000
-tokens/minute**. Measured through the telemetry above, a simple single-tool question
-costs **2,800–3,200 tokens — roughly 40% of a minute's allowance** — so three in quick
-succession will 429. Complex multi-tool questions cost several times that. Test the
-connection through the sidebar; it uses Groq's models endpoint and spends nothing.
+**Two Groq caps apply, and they fail differently.** The gpt-oss models allow **8,000
+tokens/minute**, and `gpt-oss-20b` also has a **200,000 tokens/day** ceiling. Measured
+through the telemetry above, a simple single-tool question costs **2,800–3,200 tokens —
+roughly 40% of a minute's allowance** — so three in quick succession will 429. Complex
+multi-tool questions cost several times that, and a full run of `tests/score_routing.py`
+is around 110,000, so two of those spend the day.
+
+The error message names which cap was hit, and it is worth reading: one clears in
+seconds, the other not until tomorrow. Test the connection through the sidebar; it uses
+Groq's models endpoint and spends nothing.
 
 **Providers retire models.** Both original models were decommissioned mid-project and
 began 404-ing mid-answer. Ids live in `backend/agent/models.py`, are overridable by

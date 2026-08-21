@@ -384,10 +384,18 @@ that did not even list Ceph.
 
 ## 8. Cons
 
-- **Tokens are capped PER MINUTE now, not per day.** The gpt-oss models allow
-  **8,000 tokens/minute**. Three questions in quick succession will 429. This is a
-  different constraint from the old daily budget and bites during demos rather than at
-  the end of the day.
+- **Two token caps apply, not one.** The gpt-oss models allow **8,000 tokens/minute**,
+  so three questions in quick succession will 429 — that is the one that bites during
+  demos. But there is **also a 200,000 tokens/day ceiling on `gpt-oss-20b`**, and this
+  document previously said the daily budget had gone away. It has not. Two full runs of
+  `tests/score_routing.py` (~110,000 tokens each) exhausted it, after which nothing in
+  the app or the test suite could call a model until it reset. The error names which
+  cap was hit — read it, because the two need completely different responses: wait a
+  minute, or wait until tomorrow.
+- **The `--offline` eval tier is not actually free.** It advertises "no network, ~13s",
+  but `test_every_graph_node_announces_itself` invokes the compiled graph, which calls
+  models. It contributed to spending the daily budget above, and once that budget is
+  gone this test fails in a way that looks like a code regression.
 - **The costs are now measured, and the old estimates were wrong.** `agent/telemetry.py`
   records Groq's own usage per call and every answer displays it. Measured on a simple
   single-tool question:
