@@ -67,6 +67,78 @@ def _fmt(num_bytes, unit=GB, suffix="GB") -> str:
         return f"0.00 {suffix}"
 
 
+def _fields_note(records: list, shown, limit: int = 24) -> str:
+    """Name the fields Ceph returned that the table does not show.
+
+    Widening these tables is not an option: all 64 fields of /api/pool run to
+    68,000 characters against an 8,000-token-per-minute budget. But a model
+    shown seven columns reports the other fields as absent from CEPH, which is
+    a claim about our projection dressed up as a claim about the cluster.
+    Naming them costs a line and makes the omission ours again.
+    """
+    if not records or not isinstance(records[0], dict):
+        return ""
+    shown = {str(c).lower() for c in shown}
+    hidden = [k for k in records[0]
+              if k.lower() not in shown and not k.lower().endswith(("_gb", "_tb"))]
+    if not hidden:
+        return ""
+    listed = ", ".join(hidden[:limit])
+    if len(hidden) > limit:
+        listed += f", and {len(hidden) - limit} more"
+    # No "N of M" fraction: the columns are renamed and derived (pool_name ->
+    # pool, bytes -> stored_GB), so counting name matches understates what the
+    # table already shows and would be a wrong number stated confidently.
+    return (f" Ceph returns {len(records[0])} fields per record and the table shows a "
+            f"derived subset, so a field missing here is not missing from Ceph. "
+            f"Also available: {listed}. Ask for one by name if you need it.")
+
+
+def _flatten(value):
+    """Render one API value as a cell, whatever shape it arrived in.
+
+    Nested lists and dicts are the reason fields get hand-picked out of a
+    payload and then reported as absent, so nothing is dropped here: an
+    unrecognised shape is stringified rather than skipped.
+    """
+    if value is None or value == "" or value == [] or value == {}:
+        return "—"
+    if isinstance(value, list):
+        # Ceph's repeated shape is [{'type': x, 'count': n}, ...].
+        parts = []
+        for item in value:
+            if isinstance(item, dict) and "type" in item:
+                count = item.get("count") or 1
+                parts.append(item["type"] + (f" x{count}" if count > 1 else ""))
+            else:
+                parts.append(str(item))
+        return ", ".join(parts) or "—"
+    if isinstance(value, dict):
+        # Flag-style dicts read better as the list of what is true.
+        if all(isinstance(v, bool) for v in value.values()):
+            return ", ".join(k for k, v in value.items() if v) or "—"
+        return ", ".join(f"{k}={v}" for k, v in value.items())
+    return str(value)
+
+
+def _rows_from(records: list, first: tuple = ()) -> list:
+    """Build table rows from the payload's OWN keys, never a fixed list.
+
+    A hand-written projection silently drops whatever the API adds later, and
+    the model then reports the missing field as missing from Ceph rather than
+    from the table. Columns in `first` lead; the rest follow in payload order.
+    """
+    keys = []
+    for name in first:
+        if any(name in r for r in records):
+            keys.append(name)
+    for record in records:
+        for name in record:
+            if name not in keys:
+                keys.append(name)
+    return [{k: _flatten(r.get(k)) for k in keys} for r in records]
+
+
 def _health_summary(client) -> tuple:
     health = client.health()
     status = (health.get("health") or {}).get("status", "UNKNOWN")
@@ -236,6 +308,7 @@ def query_ceph(
                 summary += ("NOTE: the 'backups' pool is empty — Cinder backup is "
                             "configured but nothing has been backed up. RBD snapshots "
                             "exist but a snapshot is not a backup. ")
+            summary += _fields_note(pools, table.columns)
             return {"summary": summary, "dataframe": table, "raw": {"pools": pools}}
 
         # ------------------------------------------------------------ osds
@@ -280,18 +353,44 @@ def query_ceph(
             if down:
                 summary += (" NOT UP: " + ", ".join(f"osd.{r['osd']} on {r['host']} "
                                                     f"({r['state']})" for r in down) + ".")
+            summary += _fields_note(osds, table.columns)
             return {"summary": summary, "dataframe": table, "raw": {"osds": osds}}
 
         # ----------------------------------------------------------- hosts
         if kind in ("hosts", "host", "nodes"):
             hosts = client.hosts()
-            rows = [{"hostname": h.get("hostname"),
-                     "labels": ", ".join(h.get("labels") or []) or "—",
-                     "status": h.get("status") or "ok"} for h in hosts]
-            summary = (f"{len(rows)} host(s) in the Ceph cluster: "
-                       + ", ".join(r["hostname"] for r in rows) + ". "
-                       + "These are the same machines Prometheus monitors and "
-                         "OpenSearch collects logs from, so a host name joins all three.")
+            # Ceph leaves `status` empty for a normal host and fills it only for
+            # maintenance or offline, so blank means ok rather than unknown.
+            # The version string repeats a commit hash on every row; the full
+            # value stays in `raw`.
+            tidy = []
+            for h in hosts:
+                h = dict(h)
+                h["status"] = h.get("status") or "ok"
+                raw_version = h.get("ceph_version") or ""
+                if "version " in raw_version:
+                    number = raw_version.split("version ")[1].split(" ")[0]
+                    name = raw_version.split(") ")[1].split(" ")[0] if ") " in raw_version else ""
+                    h["ceph_version"] = f"{number} {name}".strip()
+                tidy.append(h)
+            rows = _rows_from(tidy, first=("hostname", "addr", "status", "labels"))
+            # The address is a real join key — server01 at 192.168.1.29 is the
+            # machine Prometheus runs on — so it belongs in the summary as a
+            # fact, not only in a table the model sees ten rows of.
+            where = ", ".join(f"{h.get('hostname')} ({h.get('addr') or 'no address'})"
+                              for h in hosts)
+            daemons = "; ".join(
+                f"{h.get('hostname')}: " + _flatten(h.get("service_instances"))
+                for h in hosts)
+            version = next((r.get("ceph_version") for r in rows
+                             if r.get("ceph_version") not in (None, "—")), "")
+            summary = (f"{len(rows)} host(s) in the Ceph cluster: {where}. "
+                       f"Daemons per host — {daemons}. "
+                       + (f"All running Ceph {version}. " if version else "")
+                       + "Every field Ceph returns for a host is in the table. "
+                         "These are the same machines Prometheus monitors and "
+                         "OpenSearch collects logs from, so both the host name "
+                         "and the address join all three.")
             return {"summary": summary, "dataframe": pd.DataFrame(rows),
                     "raw": {"hosts": hosts}}
 
@@ -339,6 +438,8 @@ def query_ceph(
                 summary += (f"{len(vm_backed)} VM(s) have their disk in Ceph. Ceph cannot "
                             f"see VMs stored on local hypervisor disk — for a total VM "
                             f"count use query_prometheus, not this tool. ")
+            flat = [img for g in groups for img in (g.get("value") or [])]
+            summary += _fields_note(flat, table.columns)
             return {"summary": summary, "dataframe": table, "raw": {"images": groups}}
 
         # ------------------------------------------------------ snapshots
@@ -495,6 +596,10 @@ def query_ceph(
                     rows.append({
                         "channel": channel,
                         "priority": priority,
+                        # Which daemon logged it, e.g. mon.server01. One short
+                        # column, and without it "where is this coming from"
+                        # cannot be answered from the table at all.
+                        "daemon": entry.get("name") or "—",
                         "concerning": priority in _LOG_CONCERNING,
                         "disk_related": any(h in message.lower()
                                             for h in _DISK_FAILURE_HINTS),
@@ -526,6 +631,10 @@ def query_ceph(
                             "recorded. This is the recent log only, not the full "
                             "history: a disk that failed long ago and was replaced "
                             "would no longer appear here. ")
+            entries = [e for c in ("clog", "audit_log") for e in (payload.get(c) or [])]
+            # `at` is Ceph's `stamp` and `daemon` is its `name`; both are shown
+            # under clearer names, so neither should be listed as missing.
+            summary += _fields_note(entries, list(table.columns) + ["stamp", "name"])
             return {"summary": summary, "dataframe": table, "raw": {"logs": payload}}
 
         # ------------------------------------------------------ endpoints

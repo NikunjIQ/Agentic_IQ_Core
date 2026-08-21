@@ -700,3 +700,64 @@ def test_ceph_snapshots_report_when_the_last_one_was_taken():
     result = query_ceph.invoke({"query_type": "snapshots"})
     assert "Most recent snapshot taken" in result["summary"]
     assert "taken_at" in result["dataframe"].columns
+
+
+def test_ceph_hosts_carry_every_field_the_api_returned():
+    """A hand-picked projection made the model report Ceph as lacking the data.
+
+    /api/host returns eight fields per host. The table was built from a fixed
+    list of three, so the address never reached the answer and the model said
+    "no IP address is included in that payload" — a confident claim about Ceph
+    that was actually a claim about our own column list. Rows are now built
+    from the payload's own keys, so a field cannot go missing silently.
+    """
+    from tools.ceph_tool import query_ceph
+    result = query_ceph.invoke({"query_type": "hosts"})
+    payload = result["raw"]["hosts"]
+    assert payload, "no Ceph hosts returned"
+
+    columns = set(result["dataframe"].columns)
+    for key in payload[0]:
+        assert key in columns, f"{key} was dropped from the table"
+
+    # The address is a join key to Prometheus and Zabbix, so it is stated as a
+    # fact in the summary rather than left in a table the model samples.
+    summary = str(result["summary"])
+    for host in payload:
+        if host.get("addr"):
+            assert host["addr"] in summary, f"{host['addr']} missing from summary"
+
+    # Which daemons run where is only in service_instances; it was dropped too.
+    assert "mgr" in summary and "mon" in summary, summary[:200]
+
+
+def test_ceph_wide_payloads_name_the_fields_they_do_not_show():
+    """Trimming is fine; trimming silently is not.
+
+    /api/pool returns 64 fields per pool. Showing them all runs to ~68,000
+    characters against an 8,000-token-per-minute budget, so the table stays
+    narrow — but a model shown seven columns reported the rest as absent from
+    Ceph, which is a claim about our projection wearing the cluster's clothes.
+    Each wide payload now names what it left out.
+    """
+    from tools.ceph_tool import query_ceph
+    for query_type, expect in (("pools", "pg_num"),
+                               ("osds", "weight"),
+                               ("images", "obj_size")):
+        summary = str(query_ceph.invoke({"query_type": query_type})["summary"])
+        assert "not missing from Ceph" in summary, f"{query_type}: no field note"
+        assert expect in summary, f"{query_type}: expected {expect!r} to be named"
+
+    # Narrow payloads have nothing to disclose, so they must stay quiet rather
+    # than padding every answer with a note.
+    for query_type in ("hosts", "snapshots"):
+        summary = str(query_ceph.invoke({"query_type": query_type})["summary"])
+        assert "Also available:" not in summary, f"{query_type}: spurious field note"
+
+
+def test_ceph_logs_say_which_daemon_logged_the_entry():
+    """`name` (mon.server01) was dropped, so "where is this from" was unanswerable."""
+    from tools.ceph_tool import query_ceph
+    result = query_ceph.invoke({"query_type": "logs"})
+    assert "daemon" in result["dataframe"].columns
+    assert result["dataframe"]["daemon"].str.contains(r"\.", regex=True).any()
