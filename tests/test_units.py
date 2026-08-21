@@ -920,10 +920,18 @@ def test_storage_vocabulary_names_its_system():
     the ceiling over the model's judgement, mirroring looks_ambiguous below it.
     """
     from agent import clarify
-    for question in ("Give me the snapshot details", "show me the osds",
-                     "how full are the pools", "is the rbd image there"):
+    for question in ("show me the osds", "how full are the pools",
+                     "is the rbd image there", "what does the crush rule say"):
         assert clarify.resolves_to_one_tool(question) == "query_ceph", question
     assert clarify.resolves_to_one_tool("how many tickets are open") == "query_zammad"
+
+    # "snapshots" was resolved here until the routing score showed what that
+    # costs: a resolver blind to shared nouns sent "Get me Prometheus URL?" to
+    # Prometheus, when Ceph's dashboard is what records that URL. Shared nouns
+    # now go to the model, which reads the recorded default and can weigh the
+    # whole sentence rather than matching one word.
+    assert clarify.resolves_to_one_tool("Give me the snapshot details") == ""
+    assert clarify.resolves_to_one_tool("Get me Prometheus URL?") == ""
 
 
 def test_two_systems_named_still_falls_through_to_the_question():
@@ -1012,3 +1020,84 @@ def test_vague_questions_are_caught_without_a_model():
     import routing_cases
     for question in routing_cases.SHOULD_ASK:
         assert clarify.looks_ambiguous(question), f"floor missed: {question!r}"
+
+
+def test_every_capability_is_something_the_router_can_see():
+    """A tool branch nobody can say is a branch nobody can reach.
+
+    The classifier reads one-line summaries, not docstrings. Ceph's summary
+    listed capacity, pools, OSDs, images and health but not snapshots, so
+    "give me the snapshot details" had nothing to attach to and went to Zabbix.
+    This walks each tool's surface and fails when a capability has no words in
+    its summary — the exact shape of that bug, caught before a user finds it.
+    """
+    from agent.vocabulary import SURFACE
+    from agent.tool_registry import ROUTING_SUMMARIES
+
+    missing = []
+    for tool, capabilities in SURFACE.items():
+        summary = ROUTING_SUMMARIES[tool].lower()
+        for capability, words in capabilities.items():
+            if not any(word.lower() in summary for word in words):
+                missing.append(f"{tool}.{capability} (wanted one of {words})")
+    assert not missing, "router cannot see: " + "; ".join(missing)
+
+
+def test_declared_query_types_all_have_vocabulary():
+    """Adding a branch must fail the suite until someone says what it is called.
+
+    Reads the query_type values each tool advertises in its own docstring —
+    which is what argument extraction reads too, so anything absent there is
+    unreachable regardless — and requires an entry for each.
+    """
+    import re
+    from agent.vocabulary import SURFACE, PLUMBING
+    from agent.tool_registry import TOOL_REGISTRY
+
+    for tool in ("query_ceph", "query_zabbix"):
+        doc = TOOL_REGISTRY[tool]["description"] or ""
+        declared, capturing = set(), False
+        for line in doc.splitlines():
+            if re.search(r"\bquery_type\b", line):
+                capturing = True
+            elif capturing and line.strip() and not line.startswith((" ", "\t")):
+                capturing = False
+            if capturing:
+                declared.update(re.findall(r"'([a-z_]{3,})'", line))
+        known = set(SURFACE[tool]) | PLUMBING
+        assert declared <= known, f"{tool}: no vocabulary for {sorted(declared - known)}"
+
+
+def test_collisions_are_decided_not_left_to_chance():
+    """Every shared noun needs a recorded default and a reason.
+
+    Both corpora claim "hosts" with nothing in either sentence to tell them
+    apart. Whichever way that resolves, it should be a decision somebody made.
+    """
+    from agent.vocabulary import COLLISIONS, SURFACE, collision_guidance
+    for entry in COLLISIONS:
+        assert len(entry["systems"]) > 1, entry["noun"]
+        assert entry["prefer"] in entry["systems"], entry["noun"]
+        assert entry["note"].strip(), f"{entry['noun']}: no reason recorded"
+        for tool in entry["systems"]:
+            assert tool in SURFACE, f"{entry['noun']}: unknown {tool}"
+    # The compact form goes in the prompt; the long form carries the reasoning
+    # for whoever reads the file. Both must name the noun and its default.
+    compact = collision_guidance()
+    assert '"hosts" -> zabbix' in compact, compact[:200]
+    assert len(compact) < len(collision_guidance(compact=False))
+    assert "Ceph has three cluster hosts" in collision_guidance(compact=False)
+
+
+def test_anchor_words_cover_the_storage_vocabulary():
+    """The ambiguity floor did not know the word "ceph" once.
+
+    "is ceph healthy?" was answered with a clarifying question that did not
+    even list Ceph among the options. Deriving the words from the surface means
+    a new capability widens the floor automatically.
+    """
+    from agent.vocabulary import anchor_words
+    words = set(anchor_words())
+    for word in ("snapshots", "pools", "osds", "cephfs", "crush", "tickets",
+                 "containers", "logs", "hosts"):
+        assert word in words, f"anchor words missing {word!r}"

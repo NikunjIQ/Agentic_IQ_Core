@@ -3,7 +3,7 @@ from langchain_groq import ChatGroq
 from agent.state import AgentState
 from agent.tool_registry import TOOL_REGISTRY
 from agent.history import recent_turns
-from agent import streaming, clarify, telemetry
+from agent import streaming, clarify, telemetry, vocabulary
 
 from agent.models import FAST_MODEL
 
@@ -31,8 +31,20 @@ Given a user's question, decide:
             "how many OSDs are up" (Ceph alone — a storage object names its
             system just as surely as the word Ceph does).
 
+   COMPLEXITY IS NOT CONFIDENCE. It asks how many systems hold the facts, and
+   nothing else. A question you find hard to place is still SIMPLE if one system
+   holds the answer. Never answer "complex" because you could not pick a tool.
+
 Available tools:
 {tool_descriptions}
+
+   Some words belong to two systems. These are settled for this estate — apply
+   the default unless the question carries one of the signals beside it, and
+   apply the same reasoning to wordings not listed here:
+{collisions}
+
+   PICK A TOOL. Abstaining is not the safe choice: it costs the user an answer.
+   If two tools could serve, choose the likelier and move on.
 
 3. Is the question too vague to act on without guessing? If so, name the ONE axis that
    is unclear:
@@ -54,6 +66,10 @@ Available tools:
    Also null if the previous assistant message was a clarifying question — the
    user is answering it, not asking something new.
 
+   Being unsure WHICH system is not the same as the question naming none. A
+   question that names an object type is answerable; ask only when the sentence
+   names nothing at all.
+
 Respond with ONLY a JSON object, no other text:
 {{
   "complexity": "simple" or "complex",
@@ -69,7 +85,11 @@ def _classify_node_impl(state: AgentState) -> AgentState:
     # parameter documentation only matters once arguments are being extracted.
     tool_descriptions = "\n".join(f"- {name}: {entry['routing_summary']}"
                                   for name, entry in TOOL_REGISTRY.items())
-    prompt = CLASSIFY_PROMPT.format(tool_descriptions=tool_descriptions)
+    # Shared nouns come from agent.vocabulary in their short form: the model
+    # needs the rule, not the reasoning behind it, and this is already the most
+    # expensive call in the app.
+    prompt = CLASSIFY_PROMPT.format(tool_descriptions=tool_descriptions,
+                                    collisions=vocabulary.collision_guidance())
 
     # A follow-up ("and server02?") is unroutable on its own — the system it
     # belongs to lives in the previous turn.

@@ -14,6 +14,7 @@ from live values, so it can never offer a host group that does not exist.
 
 import re
 
+from agent import vocabulary
 from agent.metadata import live_options
 
 AXES = ("system", "scope", "timeframe")
@@ -86,22 +87,13 @@ def was_just_asked(conversation_history) -> bool:
 # Words that anchor a question to something concrete — a system, a kind of
 # object, a metric, a host. A question containing none of these ("what's down",
 # "is everything ok") does not say enough to route on.
-_ANCHOR = re.compile(
-    r"""(?ix)\b(
-        zabbix | prometheus | zammad | opensearch | grafana | ceph
-      | ticket s? | helpdesk | sla | agent s? | escalat \w*
-      | log s? | error s? | openstack | nova | neutron | keystone | glance | cinder
-      | rabbit \w* | mysql | haproxy | elastic \w* | container s? | exporter s?
-      | host s? | device s? | router s? | switch \w* | server \w* | node s?
-      | vm s? | virtual \s+ machine s? | instance s?
-      | cpu | memory | ram | disk | storage | filesystem | traffic | bandwidth
-      | pool s? | osd s? | rbd | capacity | replicat \w* | snapshot s? | backup s?
-      | interface s? | uptime | load | trigger s? | alert s? | problem s?
-      | windows | linux | snmp | ping | port s?
-    )\b
-    | \d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}
-    """
-)
+#
+# Derived from agent.vocabulary rather than kept here, because this list and
+# the routing summaries drifted apart independently: the floor did not know
+# the word "ceph", so "is ceph healthy?" was answered with a clarifying
+# question that did not even offer Ceph. A new capability now widens the
+# floor on its own.
+_ANCHOR = re.compile(vocabulary.anchor_pattern(), re.IGNORECASE)
 
 
 def looks_ambiguous(question: str) -> bool:
@@ -118,15 +110,24 @@ def looks_ambiguous(question: str) -> bool:
 # and over-asks in the other direction from looks_ambiguous: "Give me the
 # snapshot details" is an official Ceph question, and it was coming back as
 # "which system did you mean?" because no system is named in the sentence.
-# Nothing here may be a word two systems could claim — an ambiguous term must
-# fall through to the question, not be resolved by a coin toss.
+#
+# Every shared noun is excluded. Scored against the routing corpus, a version
+# that ignored them would have misrouted "Get me Prometheus URL?" to Prometheus
+# — a Ceph question, since Ceph's dashboard is what records that URL — and sent
+# two cross-system questions to Zammad alone. A word two systems claim is
+# ambiguous by definition; the model applies the recorded default from the
+# prompt, which can weigh a whole sentence, where this can only match a word.
 _TOOL_WORDS = {
     "query_ceph": ("ceph", "cephfs", "osds?", "rbd", "crush", "mds",
-                   "snapshots?", "replicas?", "replication", "pools?"),
+                   "pools?", "replicas?", "replication"),
     "query_zabbix": ("zabbix", "snmp", "triggers?", "icmp"),
-    "query_zammad": ("zammad", "tickets?", "helpdesk", "queues?"),
-    "query_prometheus": ("prometheus", "promql", "scrapes?", "exporters?",
-                         "containers?"),
+    # "tickets" earns its place by making cross-system questions match TWO
+    # systems and so resolve to neither. Dropping it sent "is there a ticket for
+    # the ceph network alert?" to Ceph alone. "problems" was tried here for the
+    # same reason and removed: it pulled "is anyone working on the disk space
+    # problem?" to Zabbix, which is the correlation question, not a Zabbix one.
+    "query_zammad": ("zammad", "helpdesk", "queues?", "tickets?"),
+    "query_prometheus": ("promql", "scrapes?", "exporters?", "containers?"),
     "query_opensearch": ("opensearch", "flog"),
 }
 
@@ -138,15 +139,22 @@ _TOOL_VOCABULARY = tuple(
     for name, words in _TOOL_WORDS.items()
 )
 
+# Any question carrying one of these is left to the model, whatever else it says.
+_SHARED_NOUNS = re.compile(
+    r"\b(?:" + "|".join(re.escape(entry["noun"]) for entry in vocabulary.COLLISIONS)
+    + r")\b", re.IGNORECASE)
+
 
 def resolves_to_one_tool(question: str) -> str:
     """The single tool this question's vocabulary names, or "".
 
     A ceiling over the model's judgement, the counterpart to looks_ambiguous.
-    Returns "" when two systems' words both appear — that is real ambiguity and
-    belongs in a question to the user, or in the complex path.
+    Returns "" when two systems' words both appear, or when any shared noun is
+    present — both are real ambiguity, and neither is this function's to settle.
     """
     text = str(question or "")
+    if _SHARED_NOUNS.search(text):
+        return ""
     matched = {name for name, pattern in _TOOL_VOCABULARY if pattern.search(text)}
     return matched.pop() if len(matched) == 1 else ""
 

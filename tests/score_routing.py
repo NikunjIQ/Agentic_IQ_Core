@@ -6,9 +6,17 @@
     python tests/score_routing.py --limit 10       # first N cases
     python tests/score_routing.py --no-stability   # skip the repeat pass
 
-Spends tokens: one classify call per question, ~1,200 each. Paced by
-IQCORE_EVAL_PACING because the models are capped per minute, not per day — at
-no pacing this rate-limits and the failures look like routing regressions.
+Spends tokens: one classify call per question, ~1,500 each, so a full run is
+around 110,000. Two caps apply, and both bite here:
+
+  per minute  ~8,000 tokens. IQCORE_EVAL_PACING spaces the calls out; without
+              it the run rate-limits and the failures read as routing bugs.
+  per DAY     200,000 tokens on gpt-oss-20b. Two full runs exhaust it, and
+              then nothing else can call a model until it resets. Use --only
+              and --limit; score one group at a time.
+
+A rate limit stops the run and reports whatever was measured, rather than
+losing the whole thing to the last question.
 
 No tools are called. This measures the routing decision only.
 """
@@ -47,11 +55,26 @@ def _system(tool: str) -> str:
     return (tool or "-").replace("query_", "")
 
 
+class BudgetSpent(Exception):
+    """The day's tokens are gone. Whatever was scored still counts."""
+
+
 def run(cases, label, pace=True):
     """Score cases of the form (question, expected_tool, expected_complexity)."""
     rows = []
     for index, (question, expected_tool, expected_complexity) in enumerate(cases):
-        result = classify(question)
+        try:
+            result = classify(question)
+        except Exception as exc:
+            # gpt-oss-20b has a 200,000 tokens-per-DAY ceiling as well as the
+            # per-minute one, and a full scoring run is ~110,000 of it. Losing
+            # every measured row to the last question would make the expensive
+            # part of the run worthless.
+            if "rate_limit" not in str(exc) and "429" not in str(exc):
+                raise
+            print(f"  {YELLOW}stopped after {len(rows)} of {len(cases)}"
+                  f" — {str(exc)[:120]}{RESET}")
+            raise BudgetSpent(str(exc)) from None
         # A cross-system case names no tool: the orchestrator picks its own, so
         # only the complexity judgement is this node's to get right.
         tool_ok = expected_tool is None or result["tool"] == expected_tool
@@ -164,20 +187,25 @@ def main():
 
     started = time.time()
     grand_ok = grand_total = 0
+    spent = False
     for name, cases in selected.items():
         if args.limit:
             cases = cases[:args.limit]
-        rows = run(cases, name)
+        try:
+            rows = run(cases, name)
+        except BudgetSpent:
+            spent = True
+            break
         ok, total = report(rows, f"{name} {DIM}({total_hint(cases)}){RESET}")
         grand_ok += ok
         grand_total += total
 
-    if not args.only or args.only == "collisions":
+    if not spent and (not args.only or args.only == "collisions"):
         cases = [(q, None, None) for q, _, _ in routing_cases.COLLISION_CASES]
         rows = run(cases, "collisions")
         report_collisions({r["question"]: r["got"] for r in rows})
 
-    if not args.only or args.only == "ask":
+    if not spent and (not args.only or args.only == "ask"):
         results = {}
         for index, question in enumerate(routing_cases.SHOULD_ASK):
             results[question] = classify(question)
@@ -185,7 +213,7 @@ def main():
                 time.sleep(PACING)
         report_should_ask(results)
 
-    if not args.only and not args.no_stability:
+    if not spent and not args.only and not args.no_stability:
         pairs = {}
         for index, question in enumerate(routing_cases.STABILITY_SAMPLE):
             first = classify(question)["tool"]
@@ -197,6 +225,9 @@ def main():
         report_stability(pairs)
 
     print("\n" + "=" * 62)
+    if spent:
+        print(f"{YELLOW}stopped early — the day's token budget is gone."
+              f" Scores above cover only what completed.{RESET}")
     if grand_total:
         colour = GREEN if grand_ok == grand_total else RED
         print(f"routing accuracy {colour}{grand_ok}/{grand_total}{RESET}"

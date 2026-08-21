@@ -60,9 +60,11 @@ ROUTING_SUMMARIES = {
         "Ceph storage cluster. The disks UNDER OpenStack: capacity and free space, "
         "pools (Cinder volumes, Glance images, Nova VM disks, backups), OSDs and "
         "disk failures, RBD images and their SNAPSHOTS, CephFS and MDS, CRUSH rules "
-        "and replication, cluster hosts, cluster logs, health and storage alerts. "
-        "Prometheus watches VM CPU and memory; Ceph watches the storage beneath "
-        "them. Not a source of VM counts."
+        "and replication, cluster hosts, cluster logs, health and storage alerts, "
+        "object storage (RGW, S3 buckets), and the monitoring endpoints its own "
+        "dashboard records — asking for the Grafana or Prometheus URL is a Ceph "
+        "question, not a Prometheus one. Prometheus watches VM CPU and memory; "
+        "Ceph watches the storage beneath them. Not a source of VM counts."
     ),
     "lookup_ticket_context": (
         "The reverse join: from a Zammad ticket id back to the device and the "
