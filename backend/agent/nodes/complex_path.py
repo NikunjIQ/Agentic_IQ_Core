@@ -78,13 +78,24 @@ sees all of it.
 
 To go the other way — from a ticket to the device that caused it — use `lookup_ticket_context`.
 
+Ceph and Prometheus are linked the same way, on the OpenStack instance UUID Ceph
+names its RBD image after and Prometheus carries as `instance_id`. For any question
+touching BOTH a VM's storage AND its compute — "is jammy on Ceph and how busy is
+it", "which VMs are Ceph-backed", "how much Ceph storage does this VM use" — call
+`correlate_vm_storage_and_compute` ONCE rather than calling query_ceph and
+query_prometheus separately and matching VM names yourself. Most VMs run on local
+hypervisor disk, invisible to Ceph, and that absence is usually the actual answer —
+a manual match would just show two tables with nothing obviously connecting them.
+
 ## RULE 2 — Single-system questions use the direct tools
 - Network devices, availability, host counts → query_zabbix
 - Linux servers, service metrics, scrape targets → query_prometheus
 - Ticket volumes, SLA, agents, states → query_zammad
-The correlation tool links Zabbix to Zammad only. Prometheus has no ticket link, so for
-Prometheus-plus-ticket questions call query_prometheus and query_zammad separately and
-say plainly that the two were not joined automatically.
+Correlation exists for Zabbix↔Zammad and Ceph↔Prometheus, and nowhere else.
+Prometheus still has no ticket link — it has no alerting rules configured, so
+nothing there can raise one — so for Prometheus-plus-ticket questions call
+query_prometheus and query_zammad separately and say plainly that the two were
+not joined automatically.
 
 ## RULE 3 — Answer from the data, then stop
 - Once you have the table you need, STOP calling tools and answer.

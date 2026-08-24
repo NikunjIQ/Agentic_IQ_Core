@@ -90,6 +90,10 @@ def _vm_inventory(client) -> list:
                 "vm": labels.get("instance_name") or domain,
                 "flavor": labels.get("flavor_name", ""),
                 "project": labels.get("project_name", ""),
+                # The same UUID Ceph names its RBD images after (<uuid>_disk in
+                # the vms pool), which is what lets vm_storage_correlation.py
+                # join a VM to its Ceph-backed disk without a second lookup.
+                "instance_id": labels.get("instance_id", ""),
             }
 
     # OpenStack's own view adds status and which hypervisor it landed on.
@@ -125,13 +129,15 @@ def _vm_inventory(client) -> list:
         except (KeyError, ValueError, TypeError):
             state = -1
 
-        ident = identity.get(domain, {"vm": domain, "flavor": "", "project": ""})
+        ident = identity.get(domain, {"vm": domain, "flavor": "", "project": "",
+                                      "instance_id": ""})
         extra = nova.get(domain, {})
         attached = volumes_by_server.get(extra.get("server_id", ""), [])
 
         rows.append({
             "vm": ident["vm"],
             "domain": domain,
+            "instance_id": ident.get("instance_id", ""),
             "running": state == 1,
             "state": labels.get("state_desc", ""),
             "status": extra.get("status", ""),

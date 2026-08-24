@@ -1310,3 +1310,94 @@ def test_every_client_goes_through_the_retry_helper():
         body = source.split("def request(", 1)[-1] if "def request(" in source else source
         assert "requests.get(" not in body and "requests.post(" not in body, (
             f"{path} calls requests directly, bypassing the retry helper")
+
+
+# --- ceph <-> prometheus VM correlation --------------------------------------
+def test_ceph_vm_images_only_reads_the_vms_pool():
+    """A UUID can appear in a Glance image name too — that is how Glance names
+    uploads — so scoping to the vms pool is what keeps this a VM-storage join
+    rather than a coincidental string match against an unrelated pool."""
+    from tools.vm_storage_correlation import _ceph_vm_images
+    uuid = "1a05a978-3dd7-488a-8801-d234565a8ed6"
+    images = [
+        {"pool_name": "vms", "value": [
+            {"name": f"{uuid}_disk", "size": 8_600_000_000, "disk_usage": 10_000_000}]},
+        {"pool_name": "images", "value": [
+            {"name": f"{uuid}", "size": 999, "disk_usage": 1}]},
+        {"pool_name": "volumes", "value": [
+            {"name": "volume-2aca0eeb-c4d6-454c-a611-ba883cd06873", "size": 1, "disk_usage": 1}]},
+    ]
+    matched = _ceph_vm_images(images)
+    assert list(matched.keys()) == [uuid], "images and volumes pools must not match"
+    assert matched[uuid]["pool"] == "vms"
+    assert matched[uuid]["provisioned_GB"] == 8.6
+
+
+def test_vm_correlation_joins_on_the_shared_uuid():
+    """The join itself: Ceph's derived UUID against Prometheus's instance_id.
+
+    Uses fake clients rather than the real ones, so this runs offline. The
+    live match (jammy, 1a05a978-...) is checked separately in
+    test_tools_live.py against the real environment.
+    """
+    import sys
+    import pandas as pd
+    from tools import vm_storage_correlation as vsc
+
+    matched_uuid = "1a05a978-3dd7-488a-8801-d234565a8ed6"
+    unmatched_uuid = "45a3786d-3dc6-4c4f-afa6-282ad4000fb8"
+
+    class _FakeProm:
+        def instant(self, query):
+            if "virtual_cpus" in query:
+                return [{"metric": {"domain": "instance-00000015"}, "value": [0, "2"]}]
+            if "cpu_time_seconds_total" in query:
+                return [{"value": [0, "0.05"]}]
+            if "memory_stats_used_percent" in query:
+                return [{"value": [0, "32.0"]}]
+            return []
+
+    class _FakeCeph:
+        def images(self):
+            return [{"pool_name": "vms", "value": [
+                {"name": f"{matched_uuid}_disk", "size": 8_600_000_000, "disk_usage": 10_000_000}]}]
+
+    def fake_inventory(client):
+        return [
+            {"vm": "jammy", "domain": "instance-00000015", "instance_id": matched_uuid,
+             "running": True, "hypervisor": "server01"},
+            {"vm": "windows", "domain": "instance-00000082", "instance_id": unmatched_uuid,
+             "running": True, "hypervisor": "server01"},
+        ]
+
+    import types
+    fake_prom_tool = types.ModuleType("tools.prometheus_tool")
+    fake_prom_tool._vm_inventory = fake_inventory
+    original = sys.modules.get("tools.prometheus_tool")
+    sys.modules["tools.prometheus_tool"] = fake_prom_tool
+
+    original_ceph, original_prom = vsc.CephClient, vsc.PrometheusClient
+    vsc.CephClient = lambda: _FakeCeph()
+    vsc.PrometheusClient = lambda: _FakeProm()
+    try:
+        df = vsc.correlate_vm_storage(vm_filter=None)
+    finally:
+        vsc.CephClient, vsc.PrometheusClient = original_ceph, original_prom
+        if original is not None:
+            sys.modules["tools.prometheus_tool"] = original
+        else:
+            del sys.modules["tools.prometheus_tool"]
+
+    assert len(df) == 2
+    jammy = df[df["vm"] == "jammy"].iloc[0]
+    windows = df[df["vm"] == "windows"].iloc[0]
+    # bool(), not `is True`: .iloc[0] on a row that mixes bools with NaN-bearing
+    # float columns upcasts the whole row, so on_ceph arrives as numpy.bool_,
+    # which `is True` silently fails against even though the value is correct.
+    assert bool(jammy["on_ceph"]), "jammy's UUID matches a Ceph image and must join"
+    assert jammy["ceph_provisioned_GB"] == 8.6
+    assert jammy["cpu_percent"] > 0, "a matched VM must carry compute figures"
+    assert not bool(windows["on_ceph"]), "windows has no Ceph image and must not join"
+    # pandas stores a missing float as NaN, not None, once the column also
+    # holds real numbers — pd.isna() is the correct check either way.
+    assert pd.isna(windows["ceph_provisioned_GB"]), "an unmatched VM keeps a row, not a false one"

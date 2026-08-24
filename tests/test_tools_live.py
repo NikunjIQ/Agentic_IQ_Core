@@ -761,3 +761,39 @@ def test_ceph_logs_say_which_daemon_logged_the_entry():
     result = query_ceph.invoke({"query_type": "logs"})
     assert "daemon" in result["dataframe"].columns
     assert result["dataframe"]["daemon"].str.contains(r"\.", regex=True).any()
+
+
+# --- ceph <-> prometheus VM correlation --------------------------------------
+def test_vm_storage_correlation_matches_the_known_ceph_backed_vm():
+    """Live-verified against the real environment before this tool was written:
+    Ceph's vms-pool image name 1a05a978-3dd7-488a-8801-d234565a8ed6_disk and
+    Prometheus's instance_id=1a05a978-... on libvirt_domain_openstack_info name
+    the same VM, jammy. Turning that fact into a permanent check the same way
+    every other shipped bug in this codebase became one.
+    """
+    from tools.vm_storage_correlation import correlate_vm_storage_and_compute
+    result = correlate_vm_storage_and_compute.invoke({"vm_filter": None})
+    df = result["dataframe"]
+    assert not df.empty, "no VMs returned at all"
+
+    jammy = df[df["vm"] == "jammy"]
+    assert not jammy.empty, "jammy must appear in the joined VM list"
+    row = jammy.iloc[0]
+    assert bool(row["on_ceph"]), "jammy is the one VM known to have a Ceph-backed disk"
+    assert row["instance_id"] == "1a05a978-3dd7-488a-8801-d234565a8ed6"
+    assert row["ceph_provisioned_GB"] > 0
+
+    # Most VMs are on local hypervisor disk and must be reported as such, not
+    # silently dropped — the absence is usually the answer for this tool.
+    others = df[df["vm"] != "jammy"]
+    assert not others.empty
+    assert not others["on_ceph"].any(), "only jammy is expected to be Ceph-backed today"
+    assert "jammy" in result["summary"]
+
+
+def test_vm_storage_correlation_filter_narrows_to_one_vm():
+    from tools.vm_storage_correlation import correlate_vm_storage_and_compute
+    result = correlate_vm_storage_and_compute.invoke({"vm_filter": "jammy"})
+    df = result["dataframe"]
+    assert len(df) == 1
+    assert df.iloc[0]["vm"] == "jammy"

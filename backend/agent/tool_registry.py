@@ -4,6 +4,7 @@ from tools.prometheus_tool import query_prometheus
 from tools.opensearch_tool import query_opensearch
 from tools.ceph_tool import query_ceph
 from tools.correlation import correlate_problems_and_tickets, lookup_ticket_context
+from tools.vm_storage_correlation import correlate_vm_storage_and_compute
 
 LANGCHAIN_TOOLS = [
     query_zammad,
@@ -13,6 +14,7 @@ LANGCHAIN_TOOLS = [
     query_ceph,
     correlate_problems_and_tickets,
     lookup_ticket_context,
+    correlate_vm_storage_and_compute,
 ]
 
 # One line per tool, for the classifier only.
@@ -69,6 +71,12 @@ ROUTING_SUMMARIES = {
     "lookup_ticket_context": (
         "The reverse join: from a Zammad ticket id back to the device and the "
         "Zabbix problem that raised it."
+    ),
+    "correlate_vm_storage_and_compute": (
+        "Joins a VM's Ceph disk to its Prometheus CPU/memory on the OpenStack "
+        "instance UUID, exact not inferred. Use for 'is this VM on Ceph', 'how "
+        "much Ceph storage does it use', 'which VMs are Ceph-backed'. Most VMs "
+        "run on local disk and are correctly reported as not on Ceph."
     ),
 }
 
