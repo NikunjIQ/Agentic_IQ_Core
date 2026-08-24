@@ -226,6 +226,22 @@ def _classify_node_impl(state: AgentState) -> AgentState:
             state["simple_tool_choice"] = resolved
             state["complexity"] = "simple"
             axis = ""
+
+    # Last word, deliberately: a real tool from the model's own forced call
+    # outranks any axis, including one the floor above just set. "What is the
+    # current unresolved case count" named no anchor word, so the floor
+    # reasserted axis="system" — but the SAME response had already named
+    # query_zammad correctly. The schema does not force `tool` and
+    # `ambiguous` to agree with each other, so this is the one place that
+    # does: a tool the model could only pick from a real enum is stronger
+    # evidence than a guess about ambiguity made in the same breath. This
+    # must run after the floor, not before it — clearing axis earlier would
+    # just have the floor put it right back, since the floor's whole job is
+    # to fire when the raw text matches no known word, which is what a
+    # genuine paraphrase looks like by definition.
+    if axis and state.get("simple_tool_choice"):
+        axis = ""
+
     state["clarify_axis"] = axis
 
     return state

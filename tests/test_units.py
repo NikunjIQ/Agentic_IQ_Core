@@ -1401,3 +1401,55 @@ def test_vm_correlation_joins_on_the_shared_uuid():
     # pandas stores a missing float as NaN, not None, once the column also
     # holds real numbers — pd.isna() is the correct check either way.
     assert pd.isna(windows["ceph_provisioned_GB"]), "an unmatched VM keeps a row, not a false one"
+
+
+def test_a_real_tool_outranks_its_own_contradicted_axis():
+    """Found live: "what is the current unresolved case count" got tool=query_zammad
+    and ambiguous="system" in the SAME model response — the schema does not force
+    these two fields to agree. The old code only trusted a model-given tool when
+    the model gave no axis at all, so the correct tool was discarded and the user
+    got a clarifying question for something already answered correctly.
+
+    Regression-tests the fix at the point that actually matters: the model names a
+    real tool, the raw question text matches no known word (so the deterministic
+    floor also independently wants to ask), and the tool must still win. Getting
+    the ordering wrong here was the trap — clearing axis before the floor runs
+    just lets the floor set it right back, since the floor's job is exactly to
+    fire on text it does not recognise, which is what a genuine paraphrase is.
+    """
+    import agent.nodes.classify as classify_mod
+
+    class _StubReply:
+        tool_calls = [{"name": "route", "args": {
+            "complexity": "simple", "tool": "query_zammad", "ambiguous": "system"}}]
+        content = ""
+
+    class _StubBound:
+        def invoke(self, messages):
+            return _StubReply()
+
+    class _StubClient:
+        def __init__(self, model, temperature):
+            pass
+
+        def bind_tools(self, tools, tool_choice):
+            return _StubBound()
+
+    original = classify_mod.ChatGroq
+    classify_mod.ChatGroq = _StubClient
+    try:
+        # No word here matches vocabulary.anchor_words(), so looks_ambiguous()
+        # independently wants to ask too — the exact condition that made the
+        # naive fix placement fail.
+        from agent import clarify
+        question = "what is the current unresolved case count"
+        assert clarify.looks_ambiguous(question), "test needs a text the floor also flags"
+
+        state = classify_mod._classify_node_impl({
+            "question": question, "conversation_history": []})
+    finally:
+        classify_mod.ChatGroq = original
+
+    assert state["simple_tool_choice"] == "query_zammad"
+    assert state["clarify_axis"] == "", (
+        "a real tool from the model's own call must outrank its own axis")
