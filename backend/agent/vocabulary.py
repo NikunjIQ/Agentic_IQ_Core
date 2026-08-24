@@ -43,6 +43,16 @@ SURFACE = {
         "endpoints": ("monitoring endpoints", "Grafana", "Prometheus URL"),
         "rgw": ("object storage", "RGW", "S3 buckets"),
     },
+    # Ceph's containers, which is NOT the same estate as the Ceph cluster
+    # above. The cluster reports OSDs and health; the containers report whether
+    # Ceph's own daemons are running. Probing found zero occurrences of
+    # HEALTH_OK, slow ops, pg, mon or mgr in the container index, so the two
+    # must not be blurred — a disk question sent here answers nothing.
+    "check_ceph_daemon_health": {
+        "problems": ("errors",),
+        "daemons": ("which daemons are logging", "last heard from"),
+        "search": ("free-text search",),
+    },
     "query_zabbix": {
         "hosts": ("hosts", "devices", "up/down status"),
         "hostgroups": ("host groups",),

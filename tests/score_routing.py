@@ -164,7 +164,7 @@ def report_stability(pairs):
 def main():
     parser = argparse.ArgumentParser(description="Score the classify node")
     parser.add_argument("--only", default="",
-                        help="one group: ceph, zabbix, zammad, prometheus, "
+                        help="one group: ceph, ceph_daemon, zabbix, zammad, prometheus, "
                              "opensearch, cross, collisions, ask")
     parser.add_argument("--limit", type=int, default=0, help="first N cases only")
     parser.add_argument("--no-stability", action="store_true")
@@ -172,6 +172,7 @@ def main():
 
     groups = {
         "ceph": routing_cases.CEPH_ROUTING,
+        "ceph_daemon": routing_cases.CEPH_DAEMON_ROUTING,
         "zabbix": routing_cases.ZABBIX_ROUTING,
         "zammad": routing_cases.ZAMMAD_ROUTING,
         "prometheus": routing_cases.PROMETHEUS_ROUTING,

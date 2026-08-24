@@ -5,6 +5,7 @@ from tools.opensearch_tool import query_opensearch
 from tools.ceph_tool import query_ceph
 from tools.correlation import correlate_problems_and_tickets, lookup_ticket_context
 from tools.vm_storage_correlation import correlate_vm_storage_and_compute
+from tools.ceph_daemon_tool import check_ceph_daemon_health
 
 LANGCHAIN_TOOLS = [
     query_zammad,
@@ -15,6 +16,7 @@ LANGCHAIN_TOOLS = [
     correlate_problems_and_tickets,
     lookup_ticket_context,
     correlate_vm_storage_and_compute,
+    check_ceph_daemon_health,
 ]
 
 # One line per tool, for the classifier only.
@@ -71,6 +73,14 @@ ROUTING_SUMMARIES = {
     "lookup_ticket_context": (
         "The reverse join: from a Zammad ticket id back to the device and the "
         "Zabbix problem that raised it."
+    ),
+    "check_ceph_daemon_health": (
+        "Health of Ceph's own daemon CONTAINERS on server01, from their stdout "
+        "(errors, which daemons are logging, when each was last heard from, "
+        "free-text search over their output). A "
+        "daemon can be broken while the cluster reports HEALTH_OK. NOT for disks, "
+        "OSDs, pools, capacity or cluster health — none of those appear in this "
+        "data at all; those are query_ceph."
     ),
     "correlate_vm_storage_and_compute": (
         "Joins a VM's Ceph disk to its Prometheus CPU/memory on the OpenStack "

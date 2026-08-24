@@ -352,6 +352,81 @@ class OpenSearchClient:
 
 
 # ---------------------------------------------------------------------------
+# Second OpenSearch cluster — container logs shipped from server01
+# ---------------------------------------------------------------------------
+class CephDaemonLogClient:
+    """The podman index: stdout from Ceph's containerised daemons.
+
+    A separate cluster from OpenSearchClient above, on its own host with its
+    own credentials, and HTTPS with a self-signed certificate — plain HTTP is
+    refused at the socket in a way that reads like the host being down rather
+    than a scheme mismatch, which cost real time to diagnose.
+
+    Deliberately NOT called a log client for Ceph itself. This index holds what
+    Ceph's containers printed, not what the Ceph cluster logged: no OSD events,
+    no PG state, no health checks. Those are CephClient's /api/logs. Probing
+    found HEALTH_OK, slow ops, pg, mon and mgr at zero occurrences here.
+    """
+
+    HEARTBEAT = "system:0"      # 83% of the Ceph rows; carries no information
+
+    def __init__(self):
+        _ensure_config()
+        raw = os.getenv("OPENSEARCH2_URL", "https://192.168.1.152:9200").rstrip("/")
+        if not raw.startswith("http"):
+            raw = "https://" + raw
+        self.url = raw
+        self.index = os.getenv("OPENSEARCH2_CEPH_INDEX", "podman-20*")
+        user = os.getenv("OPENSEARCH2_USER", "")
+        password = os.getenv("OPENSEARCH2_PASS", "")
+        self.auth = HTTPBasicAuth(user, password) if user else None
+        self.verify = str(os.getenv("OPENSEARCH2_VERIFY_TLS", "false")).lower() in (
+            "1", "true", "yes")
+        if not self.verify:
+            # Same reason as CephClient: a self-signed certificate would
+            # otherwise print a warning on every single request.
+            try:
+                import urllib3
+                urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+            except Exception:
+                pass
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.url and self.auth)
+
+    def search(self, body: dict) -> dict:
+        # track_total_hits, always. OpenSearch stops counting at 10,000 by
+        # default and reports exactly that, so a 61,000-document index answers
+        # "10000" to any count — a wrong number with no error attached, which
+        # is the silent-truncation trap three other systems here already have.
+        body = {"track_total_hits": True, **body}
+        res = request("POST", f"{self.url}/{self.index}/_search",
+                      system="Ceph daemon logs", json=body,
+                      auth=self.auth, verify=self.verify, timeout=45)
+        res.raise_for_status()
+        return res.json()
+
+    def coverage(self) -> dict:
+        """Earliest and latest document, so an answer can state what it saw.
+
+        The index is daily-rotated and was six hours deep when this was
+        written. A question about last week finds nothing, and without this
+        that reads as "nothing happened" rather than "not collected yet".
+        """
+        try:
+            data = self.search({"size": 0, "aggs": {
+                "first": {"min": {"field": "@timestamp"}},
+                "last": {"max": {"field": "@timestamp"}}}})
+            aggs = data.get("aggregations", {})
+            return {"first": aggs.get("first", {}).get("value_as_string"),
+                    "last": aggs.get("last", {}).get("value_as_string"),
+                    "documents": data.get("hits", {}).get("total", {}).get("value", 0)}
+        except Exception:
+            return {}
+
+
+# ---------------------------------------------------------------------------
 # Zammad
 # ---------------------------------------------------------------------------
 class ZammadClient:

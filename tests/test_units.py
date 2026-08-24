@@ -1453,3 +1453,60 @@ def test_a_real_tool_outranks_its_own_contradicted_axis():
     assert state["simple_tool_choice"] == "query_zammad"
     assert state["clarify_axis"] == "", (
         "a real tool from the model's own call must outrank its own axis")
+
+
+# --- ceph daemon container logs ----------------------------------------------
+def test_ceph_daemon_tool_never_offers_priority_as_severity():
+    """PRIORITY cannot mean severity in this index and must not be a filter.
+
+    Measured: 60,513 of 61,219 documents are priority 3, because anything a
+    container writes to stderr gets 3 regardless of what it says. A severity
+    filter built on it returns 99% of the index — the same shape as the "down
+    was a dead category" bug, where a plausible-looking field carried no signal.
+    Severity is read from the message text instead.
+    """
+    import inspect
+    from tools import ceph_daemon_tool
+    signature = inspect.signature(ceph_daemon_tool.check_ceph_daemon_health.func)
+    assert "priority" not in signature.parameters
+    assert "log_level" not in signature.parameters
+    assert "severity" not in signature.parameters
+
+
+def test_ceph_daemon_tool_aggregates_on_keyword_subfields():
+    """Aggregating the bare field returns EMPTY BUCKETS, not an error.
+
+    Every field in this index is `text` with a `.keyword` subfield. A breakdown
+    built on the bare name silently comes back blank, which is how a wrong
+    answer gets reported confidently. Confirmed by hitting it during probing.
+    """
+    from tools import ceph_daemon_tool
+    assert ceph_daemon_tool.CONTAINER.endswith(".keyword")
+    assert ceph_daemon_tool.UNIT.endswith(".keyword")
+
+
+def test_ceph_daemon_tool_states_its_boundary_against_query_ceph():
+    """The whole risk of this tool is being asked a disk question.
+
+    The container index holds no cluster events at all — probing found zero
+    occurrences of HEALTH_OK, slow ops, pg, mon and mgr — so a disk question
+    routed here would answer nothing, and that zero would be meaningless
+    rather than informative. The docstring is what the router reads.
+    """
+    from tools.ceph_daemon_tool import check_ceph_daemon_health
+    doc = check_ceph_daemon_health.description.lower()
+    assert "query_ceph" in doc, "the docstring must name where disk questions go"
+    for word in ("osd", "disk", "cluster health"):
+        assert word in doc, f"the docstring must exclude {word!r} explicitly"
+
+
+def test_ceph_daemon_client_forces_a_real_total():
+    """OpenSearch stops counting at 10,000 and reports exactly that.
+
+    The index holds 61,000+ documents, so without track_total_hits every count
+    answers "10000" — a wrong number with no error attached. Three other
+    systems in this app already have a silent-truncation trap; this is a fourth.
+    """
+    import inspect
+    from tools.clients import CephDaemonLogClient
+    assert "track_total_hits" in inspect.getsource(CephDaemonLogClient.search)

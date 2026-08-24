@@ -23,6 +23,21 @@ MAX_TOOL_CALLS = 5
 LOOP_SUMMARY_CHARS = 1200
 PREVIEW_ROWS = 10
 
+# The row preview is capped too, and this is not optional. LOOP_SUMMARY_CHARS
+# above trims the summary, and then an UNTRUNCATED preview was appended right
+# after it — so the guard was defeated by the thing that followed it. Measured
+# on the correlation table: summary trimmed 2,703 -> 1,200, then a 3,527-char
+# preview appended, for 4,727 chars entering the loop. That single append was
+# most of the jump that made a four-step question exceed the 8,000 TPM limit.
+#
+# 500 rather than something more generous, and deliberately tighter than
+# LOOP_SUMMARY_CHARS: the preview is only a SAMPLE, while the summary carries
+# the complete figures the answer is built from, so trimming here costs
+# context rather than correctness. Measured need — registering a ninth tool
+# added ~430 tokens to every iteration and pushed a four-step question from
+# completing to a 413, and this is where that margin was bought back.
+LOOP_PREVIEW_CHARS = 500
+
 ORCHESTRATOR_SYSTEM_PROMPT = """You are IQCore, an intelligent IT operations assistant.
 You have access to five systems, each covering DIFFERENT infrastructure:
 - Zabbix — network devices (routers, switches) and Windows hosts. Availability, SNMP, triggers.
@@ -40,6 +55,14 @@ devices: no Cisco, no interface up/down, no SNMP.
 - "logs for a network device down / interface down / router" → query_zabbix
   (query_type='problems' or 'alerts'); OpenSearch will return zero and that zero
   means "not collected here", never "nothing is wrong".
+- "is a ceph daemon/service/container failing", "did ceph-exporter stop" →
+  check_ceph_daemon_health. That reads what Ceph's CONTAINERS printed, which is
+  a different thing from what the CLUSTER logged: a daemon can be broken while
+  Ceph reports HEALTH_OK, and that fault appears nowhere else.
+- "have any disks failed", "OSD status", "cluster health", "slow ops" →
+  query_ceph. Those events do NOT exist in the container logs at all, so
+  check_ceph_daemon_health would answer nothing and the zero would be
+  meaningless rather than informative.
 
 ## RULE 0 — Send infrastructure questions to the RIGHT monitoring system
 Zabbix and Prometheus do not watch the same machines. Choose by what is being asked about:
@@ -199,6 +222,15 @@ def _complex_path_node_impl(state: AgentState) -> AgentState:
                 dataframes.append(result["dataframe"])
 
             df_context = coverage.describe_table(result.get("dataframe"), PREVIEW_ROWS)
+            # Capped for the same reason the summary above is: this is what the
+            # orchestrator carries forward to decide its NEXT call, and the
+            # complete figures already live in the summary and in
+            # tool_results_raw, which synthesis reads untruncated.
+            if len(df_context) > LOOP_PREVIEW_CHARS:
+                df_context = (df_context[:LOOP_PREVIEW_CHARS]
+                              + f"\n[…preview trimmed for reasoning; {len(df_context)} "
+                                f"chars total. Use the counts in the summary above, "
+                                f"not this sample.]")
 
             # An empty result can mean "nothing is wrong" or "this system holds no
             # data of that kind at all". Those are very different answers, and only

@@ -133,7 +133,24 @@ CROSS_SYSTEM_ROUTING = [
      "complex"),
 ]
 
-ROUTING_CASES = (CEPH_ROUTING + ZABBIX_ROUTING + ZAMMAD_ROUTING
+# Ceph's daemon CONTAINERS, which is a different estate from the Ceph cluster.
+# The container index holds no OSD, PG or health events at all, so a disk
+# question routed here answers nothing and the zero means nothing — the whole
+# risk of having added this tool.
+CEPH_DAEMON_ROUTING = [
+    ("Is anything wrong with Ceph's daemons?", "check_ceph_daemon_health", "simple"),
+    ("Are any of the ceph containers logging errors?",
+     "check_ceph_daemon_health", "simple"),
+    ("Which ceph daemons are still logging and when were they last heard from?",
+     "check_ceph_daemon_health", "simple"),
+    # The counter-examples matter more than the positives here: these must NOT
+    # reach the daemon tool.
+    ("Have any disks failed?", "query_ceph", "simple"),
+    ("What is the Ceph cluster health?", "query_ceph", "simple"),
+    ("Show me the OSD status", "query_ceph", "simple"),
+]
+
+ROUTING_CASES = (CEPH_DAEMON_ROUTING + CEPH_ROUTING + ZABBIX_ROUTING + ZAMMAD_ROUTING
                  + PROMETHEUS_ROUTING + OPENSEARCH_ROUTING + CROSS_SYSTEM_ROUTING)
 
 

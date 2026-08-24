@@ -797,3 +797,59 @@ def test_vm_storage_correlation_filter_narrows_to_one_vm():
     df = result["dataframe"]
     assert len(df) == 1
     assert df.iloc[0]["vm"] == "jammy"
+
+
+# --- ceph daemon container logs ----------------------------------------------
+def test_ceph_daemon_health_finds_the_crash_module_fault():
+    """The fault this tool was built for, and the reason it earns its place.
+
+    ceph-crash cannot post crash reports because its directory is missing, so
+    Ceph crash reports are being dropped. The CLUSTER reports HEALTH_OK
+    throughout, which means query_ceph cannot surface this at all — a daemon
+    broken while the cluster looks fine is exactly the gap this covers.
+    """
+    from tools.ceph_daemon_tool import check_ceph_daemon_health
+    result = check_ceph_daemon_health.invoke({"query_type": "problems"})
+    summary = str(result["summary"])
+    assert "ceph-crash" in summary or "crash" in summary.lower()
+    # Counts must come from an aggregation over the whole window, not from
+    # counting a sample: sampling the newest 200 reported 167 when the true
+    # figure was 725.
+    assert "exact" in summary.lower()
+    assert not result["dataframe"].empty
+    assert result["dataframe"].iloc[0]["occurrences"] > 200
+
+
+def test_ceph_daemon_health_always_states_its_coverage_window():
+    """Six hours of data. An empty result for last week is NOT 'nothing happened'."""
+    from tools.ceph_daemon_tool import check_ceph_daemon_health
+    for args in ({"query_type": "problems"}, {"query_type": "daemons"}):
+        summary = str(check_ceph_daemon_health.invoke(args)["summary"])
+        assert "NOT COLLECTED YET" in summary, f"{args}: no coverage caveat"
+        assert "rotated daily" in summary
+
+
+def test_ceph_daemon_liveness_reports_when_each_was_last_heard_from():
+    from tools.ceph_daemon_tool import check_ceph_daemon_health
+    result = check_ceph_daemon_health.invoke({"query_type": "daemons"})
+    df = result["dataframe"]
+    assert not df.empty
+    assert {"daemon", "log_lines", "last_seen"} <= set(df.columns)
+    # ceph-exporter writes every 5 seconds, so it must be the busiest daemon —
+    # that regularity is what makes a gap meaningful.
+    assert df.iloc[0]["log_lines"] > 100
+
+
+def test_ceph_daemon_index_holds_no_cluster_events():
+    """Guards the boundary in code, not just in the docstring.
+
+    If cluster events ever DO start arriving here, this test fails and the
+    routing rules should be revisited deliberately rather than by accident.
+    """
+    from tools.ceph_daemon_tool import check_ceph_daemon_health
+    for term in ("HEALTH_OK", "slow ops"):
+        result = check_ceph_daemon_health.invoke(
+            {"query_type": "search", "search": term})
+        assert "0 line(s)" in str(result["summary"]), (
+            f"{term!r} now appears in the container index; the query_ceph "
+            f"boundary in RULE -1 and the tool docstring need revisiting")
