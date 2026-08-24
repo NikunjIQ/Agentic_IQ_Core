@@ -81,7 +81,19 @@ def _explain_failure(error: Exception) -> str:
 
 
 @app.post("/chat")
-async def chat(request: ChatRequest):
+def chat(request: ChatRequest):
+    """Deliberately NOT async.
+
+    The graph is synchronous and a cold Zammad question takes ~43 seconds.
+    Declared `async def`, that ran on the event loop and blocked every other
+    request for the duration, `/health` included, so the one call you would make
+    to ask whether the server was alive was the one that could not be answered.
+
+    FastAPI runs a plain `def` endpoint in a worker thread, which is the same
+    thing /chat/stream arranges by hand. Keeping it sync also keeps telemetry
+    working: the recorder is a contextvar, so `telemetry.start()` and
+    `telemetry.summary()` have to happen on the thread the graph ran on.
+    """
     cached = answer_cache.get(request.question, request.conversation_history)
     if cached is not None:
         return JSONResponse(content=cached)
@@ -240,8 +252,12 @@ async def get_config():
 
 
 @app.post("/config/test")
-async def test_config(request: ConfigRequest):
+def test_config(request: ConfigRequest):
     """Check credentials WITHOUT saving them.
+
+    Sync for the same reason as /chat: test_all opens connections to five
+    systems and Groq, each with its own timeout, so an unreachable host held
+    the whole event loop while it waited.
 
     Values already stored are merged underneath, so a user testing one changed
     field does not have to retype every masked secret.
@@ -252,8 +268,11 @@ async def test_config(request: ConfigRequest):
 
 
 @app.post("/config")
-async def save_config(request: ConfigRequest):
-    """Persist credentials, apply them, and drop caches from the old ones."""
+def save_config(request: ConfigRequest):
+    """Persist credentials, apply them, and drop caches from the old ones.
+
+    Sync: it tests every connection before returning, same as /config/test.
+    """
     result = config_store.save(request.values)
     merged = config_store.load()
     result["results"] = config_test.test_all(merged, request.systems or None)

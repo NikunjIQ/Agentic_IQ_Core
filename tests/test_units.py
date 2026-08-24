@@ -1165,3 +1165,35 @@ def test_unreadable_routing_output_is_reported_not_swallowed():
     assert _read_decision(_Reply(content="I think this is a Zabbix question")) is None
     assert _read_decision(_Reply(content="")) is None
     assert _read_decision(_Reply(content='["not", "an", "object"]')) is None
+
+
+def test_blocking_endpoints_are_not_declared_async():
+    """`async def` on a handler that blocks stalls every other request.
+
+    /chat runs the graph, and a cold Zammad question takes ~43 seconds. /config
+    and /config/test open connections to five systems and Groq, each with its
+    own timeout. Declared `async def`, all three ran on the event loop, so while
+    one was working nothing else was served — including /health, the one call
+    you would make to ask whether the server was alive.
+
+    A plain `def` handler is run in a worker thread by FastAPI, which is what
+    /chat/stream already arranges by hand. Keeping /chat sync also keeps
+    telemetry working: the recorder is a contextvar, so it has to be started and
+    read on the thread the graph ran on.
+
+    This asserts the invariant rather than the behaviour. A behavioural test was
+    written first and thrown away: TestClient drives each request through its
+    own portal, so an async handler that blocks looks identical to one that does
+    not, and the test passed against the bug it was meant to catch. Proving it
+    properly needs a real uvicorn process, which is not worth the flakiness.
+    """
+    import inspect
+    import main
+    for name in ("chat", "test_config", "save_config"):
+        handler = getattr(main, name)
+        assert not inspect.iscoroutinefunction(handler), (
+            f"{name} is async but blocks; FastAPI cannot move it off the event loop")
+
+    # The streaming endpoint is the exception and must stay async: it returns a
+    # StreamingResponse and hands the graph to a thread itself.
+    assert inspect.iscoroutinefunction(main.chat_stream)
