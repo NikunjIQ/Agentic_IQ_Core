@@ -5,7 +5,7 @@ from agent.tool_registry import TOOL_REGISTRY
 from agent.history import recent_turns
 from agent import streaming, clarify, telemetry, vocabulary
 
-from agent.models import FAST_MODEL
+from agent.models import FAST_MODEL, REASONING_MODEL
 
 CLASSIFY_MODEL = FAST_MODEL
 
@@ -70,12 +70,8 @@ Available tools:
    question that names an object type is answerable; ask only when the sentence
    names nothing at all.
 
-Respond with ONLY a JSON object, no other text:
-{{
-  "complexity": "simple" or "complex",
-  "tool": "<tool name from the list above, ONLY if complexity is simple, otherwise null>",
-  "ambiguous": "system" or "scope" or "timeframe" or null
-}}
+Call the `route` tool with your decision. Do not write JSON as your reply —
+the tool call itself carries the answer.
 """
 
 def _route_schema() -> dict:
@@ -150,7 +146,6 @@ def _read_decision(response) -> tuple:
 
 def _classify_node_impl(state: AgentState) -> AgentState:
     streaming.status("Working out which system to check…")
-    client = ChatGroq(model=CLASSIFY_MODEL, temperature=0)
     # Routing summaries, not full docstrings. This node picks a tool name; the
     # parameter documentation only matters once arguments are being extracted.
     tool_descriptions = "\n".join(f"- {name}: {entry['routing_summary']}"
@@ -167,11 +162,27 @@ def _classify_node_impl(state: AgentState) -> AgentState:
                 + recent_turns(state.get("conversation_history"), max_turns=4)
                 + [{"role": "user", "content": state["question"]}])
 
+    # The small model occasionally emits a tool call Groq rejects outright as
+    # malformed (tool_use_failed) — a generation glitch, not a comprehension
+    # failure. simple_path.py already retries its own forced call with the
+    # larger model for exactly this reason; this call had no such protection
+    # until a real question hit it, surfaced as "could not build a valid query
+    # for it" while the graph shows only classify ever having run — no tool
+    # was ever chosen, so there is nothing to blame on routing or on Ceph.
     decision = None
-    with telemetry.measure("classify", CLASSIFY_MODEL) as call:
-        call.response = response = client.bind_tools(
-            [_route_schema()], tool_choice="route").invoke(messages)
-    decision = _read_decision(response)
+    for model, escalate in ((CLASSIFY_MODEL, False), (REASONING_MODEL, True)):
+        try:
+            with telemetry.measure("classify", model,
+                                   "escalated" if escalate else "") as call:
+                call.response = response = ChatGroq(
+                    model=model, temperature=0
+                ).bind_tools([_route_schema()], tool_choice="route").invoke(messages)
+            decision = _read_decision(response)
+            if decision is not None:
+                break
+        except Exception as exc:
+            if "tool_use_failed" not in str(exc) and "400" not in str(exc):
+                raise      # rate limits and outages should surface, not retry
 
     if decision is None:
         # Still fail safe into the complex path, but say so. This used to be
