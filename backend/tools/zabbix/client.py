@@ -4,6 +4,8 @@ import os
 
 import requests
 
+from tools import clients
+
 
 def _login(url, headers, username, password):
     """Exchange username and password for a session id.
@@ -19,7 +21,7 @@ def _login(url, headers, username, password):
     Authorization header instead, exactly like an API token.
     """
     for field, legacy in (("username", False), ("user", True)):
-        response = requests.post(url, headers=headers, timeout=10, json={
+        response = clients.request("POST", url, system="Zabbix", headers=headers, timeout=10, json={
             "jsonrpc": "2.0",
             "method": "user.login",
             "params": {field: username, "password": password},
@@ -82,7 +84,8 @@ def build_rpc():
         }
         if auth_param:
             payload["auth"] = auth_param
-        r = requests.post(zabbix_url, headers=headers, json=payload, timeout=30)
+        r = clients.request("POST", zabbix_url, system="Zabbix", headers=headers,
+                              json=payload, timeout=30)
         data = r.json()
         if "error" in data:
             raise Exception(data["error"])

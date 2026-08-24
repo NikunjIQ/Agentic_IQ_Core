@@ -27,6 +27,63 @@ def _ensure_config():
     except Exception:
         pass
 
+
+# One extra attempt by default. Set IQCORE_HTTP_RETRIES=0 to turn it off, which
+# is what the evals do when they want a failure to stay a failure.
+def _retry_budget() -> int:
+    try:
+        return max(0, int(os.getenv("IQCORE_HTTP_RETRIES", "1")))
+    except ValueError:
+        return 1
+
+
+# Only these get a second attempt. Everything else is the server answering —
+# it just did not answer the way we wanted, and asking again changes nothing.
+_WORTH_RETRYING = (requests.exceptions.Timeout,
+                   requests.exceptions.ConnectionError)
+
+
+def request(method: str, url: str, *, system: str = "", **kwargs):
+    """One HTTP request, tried again if the connection was the problem.
+
+    Ceph's image listing answered the same call in 45 seconds (timed out), then
+    25, then 10.5, with nothing changed. A single attempt turned that into
+    "could not connect to Ceph" after a 45-second wait — and the question had
+    already spent a full round of model calls by then, so the user paid twice:
+    once for the failed answer, once for retyping it.
+
+    Deliberately NOT a LangGraph RetryPolicy on the node. That would never fire,
+    because both paths catch tool failures inside the node and return normally
+    rather than raising. And if it did fire it would re-run the whole node,
+    including the argument-extraction model call — spending tokens because a
+    socket hiccuped. Retrying here repeats only the request that failed.
+
+    What is not retried matters as much as what is. An HTTP error arrives as
+    HTTPError from raise_for_status, never as Timeout, so 401, 404, 429 and 500
+    all fall through untouched. 429 especially: the models are capped per minute
+    AND per day, and retrying a rate limit spends the remainder faster while
+    never succeeding.
+    """
+    attempts = _retry_budget() + 1
+    last = None
+    for attempt in range(attempts):
+        try:
+            return requests.request(method, url, **kwargs)
+        except _WORTH_RETRYING as exc:
+            last = exc
+            if attempt + 1 >= attempts:
+                break
+            # Say so rather than just taking twice as long. Imported here, not
+            # at module level: tools/ does not depend on agent/, and the one
+            # existing exception (_ensure_config above) defers the same way.
+            try:
+                from agent import streaming
+                streaming.status(f"{system or 'The system'} did not respond, "
+                                 f"trying once more…")
+            except Exception:
+                pass
+    raise last
+
 # Zabbix severity codes -> labels (matches the Zabbix UI)
 SEVERITY_LABELS = {
     0: "Not classified",
@@ -90,9 +147,12 @@ class ZabbixClient:
                 # 6.4+ renamed the login param from "user" to "username"
                 for key in ("username", "user"):
                     try:
-                        res = requests.post(self.url, headers=self.headers, timeout=15, json={
-                            "jsonrpc": "2.0", "method": "user.login",
-                            "params": {key: user, "password": password}, "id": 1})
+                        res = request(
+                            "POST", self.url, system="Zabbix",
+                            headers=self.headers, timeout=15,
+                            json={"jsonrpc": "2.0", "method": "user.login",
+                                  "params": {key: user, "password": password},
+                                  "id": 1})
                         data = res.json()
                         if "result" in data:
                             self._auth = data["result"]
@@ -104,7 +164,8 @@ class ZabbixClient:
         payload = {"jsonrpc": "2.0", "method": method, "params": params, "id": 2}
         if self._auth:
             payload["auth"] = self._auth
-        res = requests.post(self.url, headers=self.headers, json=payload, timeout=30)
+        res = request("POST", self.url, system="Zabbix",
+                      headers=self.headers, json=payload, timeout=30)
         data = res.json()
         if "error" in data:
             raise RuntimeError(data["error"].get("data") or data["error"])
@@ -175,7 +236,8 @@ class PrometheusClient:
             self.headers["Authorization"] = f"Bearer {token}"
 
     def api(self, path: str, params: Optional[dict] = None):
-        res = requests.get(f"{self.url}/api/v1/{path}", params=params or {},
+        res = request("GET", f"{self.url}/api/v1/{path}", system="Prometheus",
+                      params=params or {},
                            headers=self.headers, auth=self.auth, timeout=30)
         res.raise_for_status()
         body = res.json()
@@ -264,20 +326,22 @@ class OpenSearchClient:
         self.auth = HTTPBasicAuth(user, password) if user else None
 
     def search(self, body: dict, path: str = "_search") -> dict:
-        res = requests.post(f"{self.url}/{self.index}/{path}", json=body,
+        res = request("POST", f"{self.url}/{self.index}/{path}", system="OpenSearch",
+                      json=body,
                             auth=self.auth, timeout=45)
         res.raise_for_status()
         return res.json()
 
     def count(self, query: dict) -> int:
-        res = requests.post(f"{self.url}/{self.index}/_count", json={"query": query},
+        res = request("POST", f"{self.url}/{self.index}/_count", system="OpenSearch",
+                      json={"query": query},
                             auth=self.auth, timeout=45)
         res.raise_for_status()
         return int(res.json().get("count", 0))
 
     def indices(self) -> list:
         try:
-            res = requests.get(f"{self.url}/_cat/indices/{self.index}",
+            res = request("GET", f"{self.url}/_cat/indices/{self.index}", system="OpenSearch",
                                params={"format": "json", "h": "index,docs.count",
                                        "s": "index:desc"},
                                auth=self.auth, timeout=30)
@@ -306,7 +370,7 @@ class ZammadClient:
                 self.auth = HTTPBasicAuth(user, password)
 
     def get(self, path: str, params: Optional[dict] = None):
-        res = requests.get(f"{self.url}{path}", headers=self.headers,
+        res = request("GET", f"{self.url}{path}", system="Zammad", headers=self.headers,
                            auth=self.auth, params=params or {}, timeout=25)
         if res.status_code == 404:
             return None
@@ -550,8 +614,10 @@ class CephClient:
         if _CEPH_TOKEN["value"] and now < _CEPH_TOKEN["expires_at"] - 60:
             return _CEPH_TOKEN["value"]
 
-        response = requests.post(
-            f"{self.url}/api/auth",
+        # The one POST in the app, and it creates nothing — it exchanges
+        # credentials for a token, so a second attempt is safe.
+        response = request(
+            "POST", f"{self.url}/api/auth", system="Ceph",
             json={"username": self.user, "password": self.password},
             headers={"Accept": "application/vnd.ceph.api.v1.0+json",
                      "Content-Type": "application/json"},
@@ -584,8 +650,8 @@ class CephClient:
     def get(self, path: str, params: Optional[dict] = None, version: Optional[str] = None):
         """One GET. The only request method this client exposes."""
         version = version or CEPH_API_VERSIONS.get(path.split("?")[0], "1.0")
-        response = requests.get(
-            f"{self.url}{path}",
+        response = request(
+            "GET", f"{self.url}{path}", system="Ceph",
             params=params,
             headers={"Accept": f"application/vnd.ceph.api.v{version}+json",
                      "Authorization": f"Bearer {self._token()}"},

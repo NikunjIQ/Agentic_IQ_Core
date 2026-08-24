@@ -1197,3 +1197,116 @@ def test_blocking_endpoints_are_not_declared_async():
     # The streaming endpoint is the exception and must stay async: it returns a
     # StreamingResponse and hands the graph to a thread itself.
     assert inspect.iscoroutinefunction(main.chat_stream)
+
+
+# --- flaky connections ------------------------------------------------------
+class _Flaky:
+    """Stands in for requests.request: fails a set number of times, then works."""
+
+    def __init__(self, error, failures=1):
+        self.error, self.failures, self.calls = error, failures, 0
+
+    def __call__(self, method, url, **kwargs):
+        self.calls += 1
+        if self.calls <= self.failures:
+            raise self.error
+        return f"response for {method} {url}"
+
+
+def _with_fake(monkeyed, fn):
+    """Run fn with clients.requests.request swapped for `monkeyed`."""
+    from tools import clients
+    original = clients.requests.request
+    clients.requests.request = monkeyed
+    try:
+        return fn()
+    finally:
+        clients.requests.request = original
+
+
+def test_a_timed_out_request_is_tried_again():
+    """Ceph answered the same call in 45s (timed out), then 25s, then 10.5s.
+
+    One attempt turned that into "could not connect to Ceph" after a 45-second
+    wait, and the question had already spent a full round of model calls, so the
+    user paid twice — once for the failed answer, once for retyping it.
+    """
+    import requests
+    from tools import clients
+    fake = _Flaky(requests.exceptions.ReadTimeout("read timed out"))
+    result = _with_fake(fake, lambda: clients.request("GET", "http://x/y", system="Ceph"))
+    assert fake.calls == 2, "a timeout should get a second attempt"
+    assert result == "response for GET http://x/y"
+
+
+def test_a_refused_connection_is_tried_again():
+    import requests
+    from tools import clients
+    fake = _Flaky(requests.exceptions.ConnectionError("refused"))
+    _with_fake(fake, lambda: clients.request("GET", "http://x/y"))
+    assert fake.calls == 2
+
+
+def test_http_errors_are_never_retried():
+    """What is NOT retried matters as much as what is.
+
+    Every client calls raise_for_status, so 401, 404, 429 and 500 arrive as
+    HTTPError, never as Timeout. 429 especially: the models are capped per
+    minute AND per day, so retrying a rate limit spends the remainder faster
+    while never succeeding.
+    """
+    import requests
+    from tools import clients
+    for error in (requests.exceptions.HTTPError("429 Too Many Requests"),
+                  requests.exceptions.HTTPError("401 Unauthorized"),
+                  requests.exceptions.HTTPError("500 Server Error")):
+        fake = _Flaky(error, failures=99)
+        try:
+            _with_fake(fake, lambda: clients.request("GET", "http://x/y"))
+        except requests.exceptions.HTTPError:
+            pass
+        assert fake.calls == 1, f"{error} must not be retried, got {fake.calls} attempts"
+
+
+def test_a_real_outage_still_fails():
+    """Retry must not turn a dead system into a hang or a false success."""
+    import requests
+    from tools import clients
+    fake = _Flaky(requests.exceptions.ReadTimeout("down"), failures=99)
+    try:
+        _with_fake(fake, lambda: clients.request("GET", "http://x/y"))
+        assert False, "an unreachable system must still raise"
+    except requests.exceptions.ReadTimeout:
+        pass
+    assert fake.calls == 2, "one extra attempt, not three"
+
+
+def test_retries_can_be_switched_off():
+    """The evals turn this off so a failure stays a failure."""
+    import os
+    import requests
+    from tools import clients
+    original = os.environ.get("IQCORE_HTTP_RETRIES")
+    os.environ["IQCORE_HTTP_RETRIES"] = "0"
+    try:
+        fake = _Flaky(requests.exceptions.ReadTimeout("x"), failures=99)
+        try:
+            _with_fake(fake, lambda: clients.request("GET", "http://x/y"))
+        except requests.exceptions.ReadTimeout:
+            pass
+        assert fake.calls == 1
+    finally:
+        if original is None:
+            os.environ.pop("IQCORE_HTTP_RETRIES", None)
+        else:
+            os.environ["IQCORE_HTTP_RETRIES"] = original
+
+
+def test_every_client_goes_through_the_retry_helper():
+    """A client calling requests directly is one that silently does not retry."""
+    import pathlib
+    for path in ("backend/tools/clients.py", "backend/tools/zabbix/client.py"):
+        source = pathlib.Path(path).read_text(encoding="utf-8")
+        body = source.split("def request(", 1)[-1] if "def request(" in source else source
+        assert "requests.get(" not in body and "requests.post(" not in body, (
+            f"{path} calls requests directly, bypassing the retry helper")
