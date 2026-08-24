@@ -25,11 +25,19 @@ Given a user's question, decide:
    that one tool can apply.
    COMPLEX: "is there a ticket for the ceph network alert" (Ceph + Zammad),
             "is anyone working on the disk space problem" (Zabbix + Zammad),
-            "which VM is slow and is it logging errors" (Prometheus + OpenSearch).
+            "which VM is slow and is it logging errors" (Prometheus + OpenSearch),
+            "how much Ceph storage is jammy using" (Ceph + Prometheus — Ceph
+            only knows raw UUIDs and pool names, NEVER a VM's name; resolving
+            "jammy" to which Ceph image that is comes from Prometheus, making
+            this two systems even though only "Ceph" is said aloud),
+            "is the windows VM's disk on ceph" (same reason — a VM name paired
+            with anything about Ceph storage always needs Prometheus first).
    SIMPLE:  "how many tickets are open" (Zammad alone),
             "is ceph healthy" (Ceph alone),
             "how many OSDs are up" (Ceph alone — a storage object names its
-            system just as surely as the word Ceph does).
+            system just as surely as the word Ceph does),
+            "how much storage does the volumes pool use" (Ceph alone — a POOL
+            name is Ceph's own vocabulary, unlike a VM name, which is not).
 
    COMPLEXITY IS NOT CONFIDENCE. It asks how many systems hold the facts, and
    nothing else. A question you find hard to place is still SIMPLE if one system

@@ -108,9 +108,12 @@ OPENSEARCH_ROUTING = [
     ("What is nova logging right now?", "query_opensearch", "simple"),
 ]
 
-# Two systems, so the only correct complexity is complex. The tool is not
-# checked: the orchestrator picks its own, and naming one here would assert
-# something this node does not decide.
+# Two systems, so the only correct complexity is complex. The tool is left as
+# None for most of these: the orchestrator picks its own inside the loop, and
+# naming one here would assert something this node does not decide. The two
+# VM-storage cases are the exception — one tool answers each in a single call,
+# classify reliably names it even while marking the question complex, and that
+# is worth checking directly rather than only checking the complexity label.
 CROSS_SYSTEM_ROUTING = [
     ("Is anyone working on the disk space problem?", None, "complex"),
     ("Is there a ticket for the ceph network alert?", None, "complex"),
@@ -119,6 +122,15 @@ CROSS_SYSTEM_ROUTING = [
     ("What is the status of 192.168.1.73 and any related tickets?",
      None, "complex"),
     ("We are low on storage — has anyone raised it?", None, "complex"),
+    # Ceph only knows raw UUIDs and pool names, never a VM's name — resolving
+    # one to a Ceph image is Prometheus's job. Found live: this misrouted to
+    # query_ceph alone, which silently dropped the VM name and answered with
+    # cluster-wide capacity instead, with nothing telling the user it had
+    # ignored what they asked about.
+    ("How much Ceph storage is jammy using?", "correlate_vm_storage_and_compute",
+     "complex"),
+    ("How much storage does eve-ng use on ceph?", "correlate_vm_storage_and_compute",
+     "complex"),
 ]
 
 ROUTING_CASES = (CEPH_ROUTING + ZABBIX_ROUTING + ZAMMAD_ROUTING
