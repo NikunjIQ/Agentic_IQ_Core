@@ -1,8 +1,8 @@
 # Agentic IQ Core — IT Operations Assistant
 
-A natural-language assistant over five IT systems. Ask a question in plain English;
-it works out which system holds the answer, queries it, and replies like a colleague
-rather than returning a report.
+A natural-language assistant over six IT data sources. Ask a question in plain
+English; it works out which system holds the answer, queries it, and replies like a
+colleague rather than returning a report.
 
 ```
 "how many hosts are down"                    -> Zabbix
@@ -11,6 +11,8 @@ rather than returning a report.
 "show me logs for today"                     -> OpenSearch
 "how much storage is free?"                  -> Ceph
 "is anyone working on the disk space issue?" -> Zabbix + Zammad, joined
+"is jammy on Ceph and how busy is it?"       -> Ceph + Prometheus, joined
+"is anything wrong with ceph's daemons?"     -> Ceph container logs
 ```
 
 ---
@@ -24,6 +26,7 @@ rather than returning a report.
 | **OpenSearch** | OpenStack application logs (`flog-*`) | ~5M docs/day, 60-day retention |
 | **Zammad** | Helpdesk tickets, agents, SLA | Tickets auto-created by Zabbix |
 | **Ceph** | Storage under OpenStack: pools, OSDs, RBD images | 19.2.3 squid; RGW not deployed |
+| **OpenSearch #2** | Ceph's *container* stdout (`podman-*`) | HTTPS, self-signed. Not the cluster log |
 
 These do **not** overlap, and the distinction matters. Zabbix watches the network kit;
 Prometheus watches the Linux servers. OpenSearch holds OpenStack service logs and
@@ -36,7 +39,7 @@ nothing about network devices — a zero result there means "not collected here"
 
 ```
 Streamlit (frontend/app.py)
-     |  POST /chat  or  /chat/stream
+     |  POST /chat/stream
 FastAPI (backend/main.py)
      |
 LangGraph:  classify -> [ clarify | simple_path | complex_path ] -> respond
@@ -45,7 +48,7 @@ LangGraph:  classify -> [ clarify | simple_path | complex_path ] -> respond
                               |            +--------------- one tool, one call
                               +---------------------------- asks a question, no tools
                                            |
-                7 tools -> Zabbix / Prometheus / OpenSearch / Zammad / Ceph
+        9 tools -> Zabbix / Prometheus / OpenSearch / Zammad / Ceph / Ceph containers
 ```
 
 **The design principle:** the LLM decides *what* to look up and writes the final
@@ -57,18 +60,17 @@ can only partly see; code is not.
 
 | Job | Model | Why |
 |---|---|---|
-| Classification | `openai/gpt-oss-20b` | Small decision, cheap |
+| Classification | `openai/gpt-oss-20b` | Small decision, cheap. Schema forced via `tool_choice` |
 | Argument extraction | `openai/gpt-oss-20b` | Schema forced via `tool_choice` |
 | Answer synthesis | `openai/gpt-oss-120b` | Prose quality |
 
-Both ids live in `backend/agent/models.py` and can be overridden with
-`IQCORE_REASONING_MODEL` and `IQCORE_FAST_MODEL`. Providers retire models — the
-previous pair, `llama-3.3-70b-versatile` and `llama-3.1-8b-instant`, were both
-decommissioned by Groq, and the connection test now checks the ids the app will
+Both ids live in `backend/agent/models.py`, overridable with `IQCORE_REASONING_MODEL`
+and `IQCORE_FAST_MODEL`. Providers retire models — the previous pair were both
+decommissioned mid-project, and the connection test checks the ids the app will
 actually call so that shows up in the sidebar rather than mid-answer.
 
-If the small model emits a malformed tool call, extraction escalates to the large one
-rather than failing the request.
+If the small model emits a malformed tool call, both classification and extraction
+escalate to the larger one rather than failing the request.
 
 ---
 
@@ -76,13 +78,15 @@ rather than failing the request.
 
 | Tool | What it answers |
 |---|---|
-| `query_zabbix` | hosts, host groups, items, problems, alerts, triggers, config audit, SLAs and service levels. Metrics cover CPU, memory, traffic, disk, uptime, OS/IOS version, agent version, hardware model/serial, ICMP latency and loss |
+| `query_zabbix` | hosts, host groups, items, problems, alerts, triggers, config audit, SLAs. Metrics cover CPU, memory, traffic, disk, uptime, OS/IOS version, agent version, hardware model/serial, ICMP latency and loss |
 | `query_prometheus` | CPU/memory/disk/load/uptime/network, scrape targets, VMs, OpenStack routers & networks, Cinder volumes, containers, raw PromQL, metric search |
 | `query_opensearch` | OpenStack logs by date, text, level, service, host, tenant; breakdowns |
-| `query_ceph` | health, capacity (raw **and** usable after replication), pools, OSDs (incl. HDD/SSD), hosts, RBD images, snapshots, CephFS/MDS, CRUSH rules and hierarchy, cluster logs, monitoring endpoints |
-| `query_zammad` | ticket counts, states, priorities, agents, organisations, SLA targets and attainment, tags, free-text search, named queues, booked time, one ticket's conversation, `group_by` |
+| `query_ceph` | health, capacity (raw **and** usable after replication), pools, OSDs, hosts, RBD images, snapshots, CephFS/MDS, CRUSH rules and hierarchy, cluster logs, monitoring endpoints |
+| `query_zammad` | ticket counts, states, priorities, agents, organisations, SLA, tags, free-text search, named queues, booked time, one ticket's conversation, `group_by` |
 | `correlate_problems_and_tickets` | Zabbix problems joined to their Zammad tickets |
 | `lookup_ticket_context` | reverse: ticket -> device and originating problem |
+| `correlate_vm_storage_and_compute` | a VM's Ceph disk joined to its Prometheus CPU/memory |
+| `check_ceph_daemon_health` | Ceph's daemon *containers* — errors, liveness. **Not** disks or cluster health |
 
 Every tool returns the same shape: a `summary` string carrying the **complete** figures,
 a trimmed `dataframe` for display, and `raw` for the debug panel. The model sees only
@@ -90,27 +94,28 @@ a trimmed `dataframe` for display, and `raw` for the debug panel. The model sees
 
 ---
 
-## The correlation engine
+## The correlation engines
 
-Zabbix creates tickets in Zammad and writes the ticket id back onto the Zabbix event as
-a tag (`__zbx_zammad_ticket_id`). That tag is a real foreign key, so the join is a
-lookup rather than a guess:
+Two pairs are joined on real foreign keys, so each is a lookup rather than a guess.
+
+**Zabbix ↔ Zammad.** Zabbix writes the ticket id back onto its own event as a tag
+(`__zbx_zammad_ticket_id`):
 
 ```
 device -> problems (+tags) -> ticket id -> fetch those tickets -> join in pandas
 ```
 
-Each row carries **evidence** and a link tier:
+Each row carries **evidence** and a link tier — `EXACT`, `NO TICKET` (the genuinely
+valuable finding), or `DANGLING`. Because it is exact, the tool can assert an
+**absence**: "this device is down and has no ticket".
 
-- `EXACT` — the tag points at a real ticket
-- `NO TICKET` — nobody raised one (the genuinely valuable finding)
-- `DANGLING` — the tag points at a deleted ticket
+**Ceph ↔ Prometheus.** OpenStack names a Ceph RBD image after the instance
+(`<uuid>_disk`), and Prometheus carries the same UUID as `instance_id`. Only 1 of 7 VMs
+is Ceph-backed; the rest run on local hypervisor disk and are reported as such rather
+than silently dropped.
 
-Because it is exact, the tool can assert an **absence** — "this device is down and has
-no ticket" — which a model eyeballing 10 rows never can.
-
-**Limitation:** the link is Zabbix↔Zammad only. Prometheus has no alerting rules
-configured, so nothing there can raise a ticket.
+**Not joined:** Prometheus↔Zammad is impossible (no alerting rules, so nothing can
+raise a ticket) and Ceph↔Zammad has no join key at all.
 
 ---
 
@@ -120,8 +125,8 @@ configured, so nothing there can raise a ticket.
 
 - Python 3.10+
 - Network reach to your Zabbix / Zammad / Prometheus / OpenSearch / Ceph
-- Ceph needs a username and password: the dashboard issues a short-lived
-  token and offers no long-lived API key
+- Ceph needs a username and password: the dashboard issues a short-lived token and
+  offers no long-lived API key
 - A Groq API key
 
 ### Install
@@ -162,12 +167,8 @@ Open `http://localhost:8501`. Set `IQCORE_BACKEND_URL` if the backend is elsewhe
 ## Conversational behaviour
 
 **It asks instead of guessing.** A question naming no system, device or metric gets a
-question back, with options drawn from your live environment:
-
-> Which set of devices did you mean?
-> - Routers · Switches · Server · something else — just tell me more
-
-Never twice in a row, and never when the question is answerable as written.
+question back, with options drawn from your live environment. Never twice in a row, and
+never when the question is answerable as written.
 
 **Answers read as replies.** They open by naming what was checked, give real values,
 and close with one useful next step.
@@ -185,42 +186,25 @@ answer is written.
 
 ## Token telemetry
 
-Every answer carries what it cost, because the models are capped **per minute** and
-"that felt expensive" is not something you can optimise.
+Every answer carries what it cost, because the models are capped and "that felt
+expensive" is not something you can optimise.
 
 ```
 🎫 3,207 tokens · 40% of a minute's allowance · 3 model call(s) · 3.2s
 ```
 
-A **Token breakdown** expander below it shows where they went:
+A **Token breakdown** expander shows where they went, per operation and per call, with
+**thinking** tokens broken out separately — around 57% of output tokens on a typical
+question are the model reasoning before it answers: billed, and never visible in the
+reply.
 
-| Operation | Calls | Tokens | Share |
-|---|---:|---:|---:|
-| Deciding which system to check | 1 | 1,170 | 36.5% |
-| Working out the tool arguments | 1 | 1,134 | 35.4% |
-| Writing the answer | 1 | 903 | 28.2% |
+Every figure comes from Groq's own `usage_metadata`. Nothing is estimated — an earlier
+round of optimisation was costed by counting characters and understated a simple
+question by roughly half.
 
-…plus every individual call with its model, input, output, **thinking** tokens and
-duration.
-
-Every figure comes from Groq's own `usage_metadata` on the response. Nothing is
-estimated — an earlier round of optimisation was costed by counting characters and
-understated a simple question by roughly half.
-
-Three things the display is deliberate about:
-
-- **Reasoning tokens are shown separately.** Around 57% of output tokens on a typical
-  question are the model thinking before it answers: billed, and never visible in the
-  reply.
-- **A cache hit reports `0 tokens`**, with the original cost beside it. Replaying the
-  first answer's figures would double-count it and make the cache look useless.
-- **A call that returns no usage figures is counted and named**, so a missing
-  measurement reads as a gap rather than a smaller total. A call that *failed* is
-  recorded too — it spent tokens.
-
-Measurement never costs an answer: the streaming path merges chunks only to recover
-usage, and a stream whose chunks cannot be merged is left unmeasured rather than
-raising.
+A cache hit reports `0 tokens` with the original cost beside it. A call that returned
+no usage figures is counted and named, so a missing measurement reads as a gap rather
+than a smaller total.
 
 ---
 
@@ -230,8 +214,10 @@ raising.
 |---|---|
 | `arg_guard.py` | Strips filters the question never asked for (the model once invented `date_filter='last 10 days'`, turning 22 tickets into 2) |
 | `coverage.py` | States truncation and empty-result meaning as fact |
+| `vocabulary.py` | One source for routing words, so prompts cannot drift apart. Documents; never decides |
+| Forced schemas | Classification and extraction return tool calls with enumerated names, so an invented tool is unrepresentable |
+| HTTP retry | One retry on timeout or connection error — never on 4xx, and never on 429 |
 | PromQL sanitiser | `x") or vector(1) #` becomes inert |
-| Error handling | Rate limits, connection failures and malformed calls become readable sentences, not 500s |
 | Answer cache | 60s TTL; never caches errors; "refresh"/"again" bypasses it |
 
 ---
@@ -239,63 +225,58 @@ raising.
 ## Tests
 
 ```bash
-python tests/run_evals.py
+python tests/run_evals.py --offline    # 111 checks, ~8s, free
+python tests/run_evals.py              # + live tool checks against the real systems
+python tests/run_evals.py --llm        # + extraction evals (spends tokens)
+python tests/run_evals.py --routing    # score which system each question routes to
 ```
 
-143 checks in about 6 minutes. No pytest needed; works under pytest unchanged.
+Three tiers: offline wiring and unit checks, live tool checks, and opt-in evals that
+spend tokens. The offline tier is genuinely free — a module names any token-spending
+test in `SPENDS_TOKENS` and the harness holds it back.
 
-```bash
-python tests/run_evals.py --offline    # no network, ~13s
-python tests/run_evals.py --llm        # includes extraction evals (spends tokens)
-```
+`tests/score_routing.py` reports routing accuracy: right system, right complexity, how
+often it asked when it should have routed, and tokens per decision. **Use `--only` to
+score one group at a time** — a full run is ~110,000 tokens.
 
-Three tiers: offline wiring and unit checks, live tool checks against the real systems,
-and opt-in NL→argument extraction evals (paced at 8s per case via `IQCORE_EVAL_PACING`,
-because the models are capped per minute). The consistency checks encode bugs that
-actually shipped — a docstring edit once changed an answer from 22 to 3,784 with no
-error, and only an eval catches that.
+The consistency checks encode bugs that actually shipped: a docstring edit once changed
+an answer from 22 to 3,784 with no error, and only an eval catches that.
 
 ---
 
 ## Known constraints
 
-**Two Groq caps apply, and they fail differently.** The gpt-oss models allow **8,000
-tokens/minute**, and `gpt-oss-20b` also has a **200,000 tokens/day** ceiling. Measured
-through the telemetry above, a simple single-tool question costs **2,800–3,200 tokens —
-roughly 40% of a minute's allowance** — so three in quick succession will 429. Complex
-multi-tool questions cost several times that, and a full run of `tests/score_routing.py`
-is around 110,000, so two of those spend the day.
+**Two Groq caps apply, and they fail differently.** 8,000 tokens/minute, and **200,000
+tokens/day on `gpt-oss-20b`**. A simple question costs ~3,800, so roughly two per
+minute and **65–70 per day**. The error names which cap was hit — one clears in
+seconds, the other does not.
 
-The error message names which cap was hit, and it is worth reading: one clears in
-seconds, the other not until tomorrow. Test the connection through the sidebar; it uses
-Groq's models endpoint and spends nothing.
+**The orchestrator is near the per-minute ceiling.** It resends all nine tool schemas
+(~4,392 tokens) plus its system prompt on every iteration. Adding the ninth tool pushed
+a four-step question into a 413 until the row preview was capped. The next tool will
+hit this again.
 
-**Providers retire models.** Both original models were decommissioned mid-project and
-began 404-ing mid-answer. Ids live in `backend/agent/models.py`, are overridable by
-environment variable, and the connection test checks the ids the app will actually
-call — so the next retirement shows up in the sidebar rather than in an answer.
+**Providers retire models.** Both original models were decommissioned mid-project. Ids
+live in `backend/agent/models.py` and are env-overridable.
 
 **Zammad fetching is inefficient.** `query_zammad` downloads the whole ticket estate
-(~3,825 tickets) before filtering. Cached 60s, but a cold answer takes ~43s. Zammad
-offers no count-only search. `tag_filter` and `search` are resolved server-side and
-skip the download; the other filters do not.
+(~3,825 tickets) before filtering for most queries. Cached 60s; a cold answer takes
+~43s. `tag_filter` and `search` skip the download.
 
 **Silent truncation is the recurring hazard.** Zammad's search returns at most 200
-rows whatever `limit` asks; Ceph's image listing returned 5 of 37 by default; Zabbix
-item searches match template items that never hold a value. Each is handled in code
-and stated in the answer, but assume the next API does it too.
+rows; Ceph's image listing returned 5 of 37 by default; OpenSearch stops counting at
+10,000 and reports exactly that. Each is handled in code and stated in the answer, but
+assume the next API does it too.
 
-**No authentication on the API.** Anyone who can reach port 8000 can query it and change
-its configuration.
+**Ceph's endpoints are flaky.** The same call has answered in 45s (timing out), 25s and
+10.5s. HTTP calls retry once on timeout.
+
+**No authentication on the API.** Anyone who can reach port 8000 can query it and
+change its configuration.
 
 **No logging.** There is no record of what the agent did after the fact.
 
 **Dependencies are unpinned.**
 
-**Ceph authentication is the one non-GET call in the app.** The dashboard issues a
-short-lived token and offers no long-lived API key, so `CephClient` performs exactly
-one POST — the login — and caches the token until it expires. There are no create,
-update or delete methods anywhere in that client.
-
-See `HANDOVER.md` for the full picture: infrastructure findings, every bug worth
-knowing, and what to build next.
+See `HANDOVER.md` for the full picture: what every file does, infrastructure findings,
+every bug worth knowing, and what to build next.
