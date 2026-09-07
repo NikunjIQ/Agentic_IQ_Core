@@ -40,6 +40,10 @@ if "pending_question" not in st.session_state:
     st.session_state.pending_question = None
 if "show_live_graph" not in st.session_state:
     st.session_state.show_live_graph = True
+# Assistant message index -> the payload that produced it, so earlier answers
+# keep their tables when the script re-runs.
+if "payloads" not in st.session_state:
+    st.session_state.payloads = {}
 
 
 def backend(method: str, path: str, **kwargs):
@@ -108,6 +112,96 @@ def render_results(results: dict):
             st.success(f"**{system}** — {outcome['message']}", icon="✅")
         else:
             st.error(f"**{system}** — {outcome['message']}", icon="❌")
+
+
+def render_payload(result: dict):
+    """Everything under an answer: tables, treemap, token breakdown, debug.
+
+    Called twice — once as the answer arrives, and again for every earlier turn
+    on each rerun. Streamlit re-runs this script top to bottom on every new
+    question, so anything drawn only inside the live block is gone the moment
+    the next question is asked. The tables used to be exactly that.
+    """
+    if not result:
+        return
+    if result.get("cached"):
+        st.caption(f"↺ cached answer ({result.get('cache_age_seconds', 0)}s old)")
+
+    for frame in result.get("dataframes", []):
+        if not frame:
+            continue
+        table = pd.DataFrame(frame)
+        # The CRUSH hierarchy is the one result whose shape is easier to
+        # see than to read: capacity split across hosts, and which OSD
+        # is down. Detected by its columns rather than by tool name, so
+        # any query returning that shape gets drawn.
+        if {"host", "osd", "size_GB"} <= set(table.columns):
+            svg = ceph_treemap.render(table.to_dict("records"))
+            if svg:
+                st.markdown(svg, unsafe_allow_html=True)
+                st.caption(ceph_treemap.caption(table.to_dict("records")))
+        st.dataframe(table, use_container_width=True)
+
+    # Where this question's tokens went. Shown under every answer rather
+    # than hidden in the debug panel: the models are capped per minute,
+    # so the cost of the question just asked is operational information.
+    telemetry = result.get("telemetry") or {}
+    if telemetry.get("served_from_cache"):
+        st.caption(
+            f"🎫 0 tokens — served from cache "
+            f"(cost {telemetry.get('original_total_tokens', 0):,} when first asked)")
+    elif telemetry.get("calls"):
+        budget = telemetry.get("minute_budget_pct", 0)
+        st.caption(
+            f"🎫 {telemetry['total_tokens']:,} tokens · "
+            f"{budget:.0f}% of a minute's allowance · "
+            f"{telemetry['model_calls']} model call(s) · "
+            f"{telemetry['seconds']:.1f}s"
+            + ("  ⚠️ over one minute's budget" if budget > 100 else ""))
+
+        with st.expander("Token breakdown"):
+            st.markdown("**Where the tokens went**")
+            st.dataframe(pd.DataFrame([
+                {"Operation": e["label"], "Calls": e["calls"],
+                 "Tokens": e["total_tokens"], "Share": f"{e['share_pct']}%"}
+                for e in telemetry.get("by_operation", [])
+            ]), use_container_width=True, hide_index=True)
+
+            st.markdown("**Every call**")
+            st.dataframe(pd.DataFrame([
+                {"Operation": c["operation"], "Detail": c["detail"] or "—",
+                 "Model": str(c["model"]).split("/")[-1],
+                 "In": c["input_tokens"], "Out": c["output_tokens"],
+                 "Thinking": c["reasoning_tokens"],
+                 "Total": c["total_tokens"], "Seconds": c["seconds"]}
+                for c in telemetry["calls"]
+            ]), use_container_width=True, hide_index=True)
+
+            reasoning = telemetry.get("reasoning_tokens", 0)
+            output = telemetry.get("output_tokens", 0)
+            if reasoning:
+                st.caption(
+                    f"{reasoning:,} of {output:,} output tokens "
+                    f"({reasoning / output * 100:.0f}%) were reasoning — the "
+                    f"model thinking before it answered. That work is billed "
+                    f"but never appears in the reply.")
+            if telemetry.get("unmeasured_calls"):
+                st.warning(
+                    f"{len(telemetry['unmeasured_calls'])} call(s) returned no "
+                    f"usage figures, so the total above is a minimum: "
+                    f"{', '.join(telemetry['unmeasured_calls'])}", icon="⚠️")
+            st.caption("Figures come from Groq's own usage reporting, "
+                       "not an estimate.")
+
+    with st.expander("Debug: agent reasoning"):
+        st.write(f"Path taken: {result.get('complexity', 'unknown')}")
+        st.write(f"Tools called: {result.get('tools_called', [])}")
+        for note in result.get("guard_notes", []):
+            st.warning(f"Argument guard: {note}", icon="🛡️")
+        for entry in result.get("tool_results_raw", []):
+            st.write(f"**{entry.get('tool', 'unknown')}** "
+                     f"called with: `{entry.get('args', {})}`")
+            st.json(entry.get("result", {}))
 
 
 # ---------------------------------------------------------------- sidebar
@@ -181,15 +275,20 @@ with st.sidebar:
     st.caption(f"Stored at `{config['path']}`")
     if st.button("Clear chat", use_container_width=True):
         st.session_state.conversation_history = []
+        st.session_state.payloads = {}
         st.rerun()
 
 
 # ---------------------------------------------------------------- chat
 st.title("IQCore — IT Operations Assistant")
 
-for message in st.session_state.conversation_history:
+for index, message in enumerate(st.session_state.conversation_history):
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
+        # Redraw this turn's tables. Streamlit rebuilds the page from scratch on
+        # every question, so an answer's tables only survive if they are drawn
+        # again here from what was kept.
+        render_payload(st.session_state.payloads.get(index))
 
 typed = st.chat_input("Ask about tickets, infrastructure, VMs or logs...")
 # A clicked suggestion is just a question the user did not have to type.
@@ -212,89 +311,18 @@ if user_input:
                 graph_holder))
             status_holder.empty()
 
-            if result.get("cached"):
-                st.caption(f"↺ cached answer ({result.get('cache_age_seconds', 0)}s old)")
-
-            for frame in result.get("dataframes", []):
-                if not frame:
-                    continue
-                table = pd.DataFrame(frame)
-                # The CRUSH hierarchy is the one result whose shape is easier to
-                # see than to read: capacity split across hosts, and which OSD
-                # is down. Detected by its columns rather than by tool name, so
-                # any query returning that shape gets drawn.
-                if {"host", "osd", "size_GB"} <= set(table.columns):
-                    svg = ceph_treemap.render(table.to_dict("records"))
-                    if svg:
-                        st.markdown(svg, unsafe_allow_html=True)
-                        st.caption(ceph_treemap.caption(table.to_dict("records")))
-                st.dataframe(table, use_container_width=True)
-
-            # Where this question's tokens went. Shown under every answer rather
-            # than hidden in the debug panel: the models are capped per minute,
-            # so the cost of the question just asked is operational information.
-            telemetry = result.get("telemetry") or {}
-            if telemetry.get("served_from_cache"):
-                st.caption(
-                    f"🎫 0 tokens — served from cache "
-                    f"(cost {telemetry.get('original_total_tokens', 0):,} when first asked)")
-            elif telemetry.get("calls"):
-                budget = telemetry.get("minute_budget_pct", 0)
-                st.caption(
-                    f"🎫 {telemetry['total_tokens']:,} tokens · "
-                    f"{budget:.0f}% of a minute's allowance · "
-                    f"{telemetry['model_calls']} model call(s) · "
-                    f"{telemetry['seconds']:.1f}s"
-                    + ("  ⚠️ over one minute's budget" if budget > 100 else ""))
-
-                with st.expander("Token breakdown"):
-                    st.markdown("**Where the tokens went**")
-                    st.dataframe(pd.DataFrame([
-                        {"Operation": e["label"], "Calls": e["calls"],
-                         "Tokens": e["total_tokens"], "Share": f"{e['share_pct']}%"}
-                        for e in telemetry.get("by_operation", [])
-                    ]), use_container_width=True, hide_index=True)
-
-                    st.markdown("**Every call**")
-                    st.dataframe(pd.DataFrame([
-                        {"Operation": c["operation"], "Detail": c["detail"] or "—",
-                         "Model": str(c["model"]).split("/")[-1],
-                         "In": c["input_tokens"], "Out": c["output_tokens"],
-                         "Thinking": c["reasoning_tokens"],
-                         "Total": c["total_tokens"], "Seconds": c["seconds"]}
-                        for c in telemetry["calls"]
-                    ]), use_container_width=True, hide_index=True)
-
-                    reasoning = telemetry.get("reasoning_tokens", 0)
-                    output = telemetry.get("output_tokens", 0)
-                    if reasoning:
-                        st.caption(
-                            f"{reasoning:,} of {output:,} output tokens "
-                            f"({reasoning / output * 100:.0f}%) were reasoning — the "
-                            f"model thinking before it answered. That work is billed "
-                            f"but never appears in the reply.")
-                    if telemetry.get("unmeasured_calls"):
-                        st.warning(
-                            f"{len(telemetry['unmeasured_calls'])} call(s) returned no "
-                            f"usage figures, so the total above is a minimum: "
-                            f"{', '.join(telemetry['unmeasured_calls'])}", icon="⚠️")
-                    st.caption("Figures come from Groq's own usage reporting, "
-                               "not an estimate.")
-
-            with st.expander("Debug: agent reasoning"):
-                st.write(f"Path taken: {result.get('complexity', 'unknown')}")
-                st.write(f"Tools called: {result.get('tools_called', [])}")
-                for note in result.get("guard_notes", []):
-                    st.warning(f"Argument guard: {note}", icon="🛡️")
-                for entry in result.get("tool_results_raw", []):
-                    st.write(f"**{entry.get('tool', 'unknown')}** "
-                             f"called with: `{entry.get('args', {})}`")
-                    st.json(entry.get("result", {}))
+            render_payload(result)
 
             st.session_state.conversation_history += [
                 {"role": "user", "content": user_input},
                 {"role": "assistant", "content": answer or result.get("final_answer", "")},
             ]
+            # Keyed by the assistant message's position, NOT stored inside the
+            # message: complex_path.py splices conversation_history straight into
+            # the Groq request, so a table parked in there would be sent to the
+            # model as message content, against an 8k-per-minute cap.
+            st.session_state.payloads[
+                len(st.session_state.conversation_history) - 1] = result
             st.session_state.suggestions = result.get("suggestions", [])
         except Exception as exc:
             status_holder.empty()
