@@ -5,7 +5,7 @@ from agent.tool_registry import TOOL_REGISTRY
 from agent.tool_schemas import TOOL_SCHEMAS
 from agent.metadata import fetch_live_metadata
 from agent.arg_guard import scrub
-from agent import streaming, clarify, coverage, telemetry
+from agent import streaming, clarify, coverage
 from agent.voice import (CONVERSATIONAL_STYLE, CONVERSATIONAL_STYLE_BRIEF,
                          system_for_tools)
 
@@ -275,8 +275,15 @@ def _complex_path_node_impl(state: AgentState) -> AgentState:
                    "You've reached the maximum tool calls. Summarize what you found so far.")
         # The full style guidance is affordable here — this closing call happens
         # once, unlike the system prompt which is resent every iteration.
+        #
+        # The systems are named as a FACT, the same way the simple path does it.
+        # Without it the closing call is told to open by naming what it checked
+        # while being given only the style rule, and it guesses — the exact
+        # failure voice.py records, where a Zammad answer opened "Checked Zabbix".
+        queried = system_for_tools(tools_called)
+        system_line = f"\n\nThe system(s) you queried: {queried}." if queried else ""
         messages.append({"role": "user",
-                         "content": f"{closing}\n\n{CONVERSATIONAL_STYLE}"})
+                         "content": f"{closing}{system_line}\n\n{CONVERSATIONAL_STYLE}"})
         streaming.status("Writing the answer…")
         final_answer = streaming.stream_text(client, messages)
 

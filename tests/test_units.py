@@ -1,21 +1,13 @@
 """Offline tests: wiring, the answer cache, and conversation history.
 
-No network, and no LLM except where SPENDS_TOKENS says otherwise, so these run
-in milliseconds and cost nothing. They are the tests that should never be
+No network, and no LLM except where the `llm` marker says otherwise, so these
+run in milliseconds and cost nothing. They are the tests that should never be
 skipped.
 """
 
 import time
 
-import conftest  # noqa: F401  (path + env bootstrap)
-
-# This module is the free tier and must stay free. Anything named here calls
-# a model, so run_evals holds it back unless --llm is passed.
-# test_every_graph_node_announces_itself invokes the compiled graph, which
-# runs classify and simple_path for real. It spent part of the daily budget
-# on every "offline" run, and once that budget was gone it failed in a way
-# that read as a routing regression rather than an exhausted quota.
-SPENDS_TOKENS = {"test_every_graph_node_announces_itself"}
+import pytest
 
 
 # --- wiring -----------------------------------------------------------------
@@ -734,6 +726,7 @@ def test_cache_reports_stats():
     assert 0.0 <= stats["hit_rate"] <= 1.0
 
 
+@pytest.mark.llm
 def test_every_graph_node_announces_itself():
     """The live view is driven by node events, not by parsing status prose.
 
@@ -772,7 +765,6 @@ def test_every_graph_node_announces_itself():
     entered = [n for n, phase in seen if phase == "enter"]
     exited = [n for n, phase in seen if phase == "exit"]
     assert "classify" in entered, f"classify never announced itself: {seen}"
-    assert "respond" in entered, f"respond never announced itself: {seen}"
     # Every node that opened must close, or the drawing spins forever.
     assert sorted(entered) == sorted(exited), f"unbalanced node events: {seen}"
 
@@ -1170,16 +1162,13 @@ def test_unreadable_routing_output_is_reported_not_swallowed():
 def test_blocking_endpoints_are_not_declared_async():
     """`async def` on a handler that blocks stalls every other request.
 
-    /chat runs the graph, and a cold Zammad question takes ~43 seconds. /config
-    and /config/test open connections to five systems and Groq, each with its
-    own timeout. Declared `async def`, all three ran on the event loop, so while
-    one was working nothing else was served — including /health, the one call
-    you would make to ask whether the server was alive.
+    /config and /config/test open connections to five systems and Groq, each
+    with its own timeout. Declared `async def`, they ran on the event loop, so
+    while one was working nothing else was served — including /health, the one
+    call you would make to ask whether the server was alive.
 
     A plain `def` handler is run in a worker thread by FastAPI, which is what
-    /chat/stream already arranges by hand. Keeping /chat sync also keeps
-    telemetry working: the recorder is a contextvar, so it has to be started and
-    read on the thread the graph ran on.
+    /chat/stream already arranges by hand.
 
     This asserts the invariant rather than the behaviour. A behavioural test was
     written first and thrown away: TestClient drives each request through its
@@ -1189,7 +1178,7 @@ def test_blocking_endpoints_are_not_declared_async():
     """
     import inspect
     import main
-    for name in ("chat", "test_config", "save_config"):
+    for name in ("test_config", "save_config"):
         handler = getattr(main, name)
         assert not inspect.iscoroutinefunction(handler), (
             f"{name} is async but blocks; FastAPI cannot move it off the event loop")

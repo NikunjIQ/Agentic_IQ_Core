@@ -12,13 +12,13 @@ nobody raised a ticket" is usually the most useful answer in the table.
 """
 
 import re
-import time
 from typing import Optional
 
 import pandas as pd
 from langchain_core.tools import tool
 
 from tools.clients import (
+    Cached,
     ZabbixClient,
     ZammadClient,
     SEVERITY_LABELS,
@@ -63,8 +63,8 @@ def parse_zabbix_ticket_body(body: str) -> dict:
 # ---------------------------------------------------------------------------
 # Device index (11 hosts today, so a plain in-memory dict is plenty)
 # ---------------------------------------------------------------------------
-_DEVICE_CACHE = {"data": None, "fetched_at": 0.0}
 DEVICE_CACHE_TTL = 300
+_DEVICE_CACHE = Cached("device index", DEVICE_CACHE_TTL)
 
 
 def build_device_index(force: bool = False) -> dict:
@@ -75,9 +75,10 @@ def build_device_index(force: bool = False) -> dict:
     name, visible name, and each interface IP. Everything that needs to turn a
     fuzzy human reference into a real device goes through here.
     """
-    now = time.time()
-    if not force and _DEVICE_CACHE["data"] and (now - _DEVICE_CACHE["fetched_at"]) < DEVICE_CACHE_TTL:
-        return _DEVICE_CACHE["data"]
+    if not force:
+        cached = _DEVICE_CACHE.get()
+        if cached:
+            return cached
 
     index = {}
     try:
@@ -94,11 +95,10 @@ def build_device_index(force: bool = False) -> dict:
                 "aliases": sorted(aliases),
             }
     except Exception:
-        return _DEVICE_CACHE["data"] or {}
+        # Stale beats empty: a transient Zabbix failure must not wipe the index.
+        return _DEVICE_CACHE.value or {}
 
-    _DEVICE_CACHE["data"] = index
-    _DEVICE_CACHE["fetched_at"] = now
-    return index
+    return _DEVICE_CACHE.put(index)
 
 
 def resolve_device(query: str) -> Optional[dict]:

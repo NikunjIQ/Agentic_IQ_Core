@@ -13,10 +13,15 @@ Assertions are about shape and internal agreement, never exact live values.
 
 import re
 
-import conftest  # noqa: F401
+import pytest
+
 from golden_queries import (ZABBIX_QUERIES, ZAMMAD_QUERIES, PROMETHEUS_QUERIES,
                             OPENSEARCH_QUERIES, ZAMMAD_SUMMARY_MUST_MENTION,
                             HONESTY_EXPECTATIONS, ZABBIX_SAMPLE_QUESTIONS)
+
+# Every check here queries the real estate. No model is called, so nothing here
+# spends tokens — but it needs the systems reachable.
+pytestmark = pytest.mark.live
 
 
 def _number_after(summary: str, label: str):

@@ -5,29 +5,18 @@ line of prose. The same events carry the node's identity, so the graph can be
 drawn and lit as the run moves through it — which is the only way to see that a
 question took the cheap route rather than the expensive one.
 
-Drawn as inline SVG rather than a chart library: the graph is seven fixed nodes,
+Drawn as inline SVG rather than a chart library: the graph is four fixed nodes,
 so the layout is known and hand-authoring it costs nothing at runtime.
 """
 
 # Layout is fixed because the graph is. x/y are the top-left of each box in a
-# 640x300 viewBox; the edges below are drawn against the same coordinates.
+# 640x200 viewBox; the edges below are drawn against the same coordinates.
 NODES = {
     "classify":     {"x": 232, "y": 18,  "w": 176, "h": 42, "label": "classify"},
     "clarify":      {"x": 16,  "y": 108, "w": 176, "h": 42, "label": "clarify"},
     "simple_path":  {"x": 232, "y": 108, "w": 176, "h": 42, "label": "simple_path"},
     "complex_path": {"x": 448, "y": 108, "w": 176, "h": 42, "label": "complex_path"},
-    "respond":      {"x": 232, "y": 198, "w": 176, "h": 42, "label": "respond"},
 }
-
-# (path, which node must be active/done for the edge to count as travelled)
-EDGES = [
-    ("M320,60 L320,108", "clarify",      "M320,74 L104,74 L104,108"),
-    ("M320,60 L320,108", "simple_path",  "M320,60 L320,108"),
-    ("M320,60 L320,108", "complex_path", "M320,74 L536,74 L536,108"),
-    ("M104,150 L104,219 L232,219", "clarify_out", None),
-    ("M320,150 L320,198", "simple_out", None),
-    ("M536,150 L536,219 L408,219", "complex_out", None),
-]
 
 _STATE_STYLE = {
     "idle":   ("#cbd5dc", "#8b98a5", "none"),
@@ -43,7 +32,7 @@ def render(states: dict, current_tool: str = "", note: str = "") -> str:
     idle, so a run that never reaches complex_path simply leaves it grey.
     """
     parts = [
-        '<svg viewBox="0 0 640 300" width="100%" '
+        '<svg viewBox="0 0 640 200" width="100%" '
         'style="max-width:640px;height:auto;font-family:ui-monospace,SFMono-Regular,Menlo,monospace" '
         'role="img" aria-label="Live view of the agent graph">',
         '<defs><marker id="lgar" viewBox="0 0 10 10" refX="9" refY="5" '
@@ -59,12 +48,6 @@ def render(states: dict, current_tool: str = "", note: str = "") -> str:
         "simple_path": "M320,60 L320,108",
         "complex_path": "M320,74 L536,74 L536,108",
     }
-    out_paths = {
-        "clarify": "M104,150 L104,219 L232,219",
-        "simple_path": "M320,150 L320,198",
-        "complex_path": "M536,150 L536,219 L408,219",
-    }
-
     for branch, d in branch_paths.items():
         lit = travelled(branch)
         colour = "#1b6e6b" if lit else "#cbd5dc"
@@ -72,9 +55,6 @@ def render(states: dict, current_tool: str = "", note: str = "") -> str:
         dash = "" if lit else ' stroke-dasharray="5 4"'
         parts.append(f'<path d="{d}" fill="none" stroke="{colour}" '
                      f'stroke-width="{width}"{dash} marker-end="url(#lgar)"/>')
-        if lit:
-            parts.append(f'<path d="{out_paths[branch]}" fill="none" stroke="{colour}" '
-                         f'stroke-width="{width}" marker-end="url(#lgar)"/>')
 
     for name, box in NODES.items():
         state = states.get(name, "idle")
@@ -97,12 +77,9 @@ def render(states: dict, current_tool: str = "", note: str = "") -> str:
 
     caption = current_tool or note
     if caption:
-        parts.append(f'<text x="320" y="278" text-anchor="middle" font-size="12" '
+        parts.append(f'<text x="320" y="186" text-anchor="middle" font-size="12" '
                      f'fill="#657483">{caption}</text>')
 
     parts.append("</svg>")
     return "".join(parts)
 
-
-def initial() -> dict:
-    return {}

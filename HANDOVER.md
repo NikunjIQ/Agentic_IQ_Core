@@ -5,8 +5,9 @@ built, why it is built that way, what is wrong with it, and what was planned nex
 
 Repo: `https://github.com/NikunjIQ/Agentic_IQ_Core` (private)
 Local: `C:\Users\NikunjSinha(Identiqa\Desktop\Agentic_IQ_Core`
-Scale: ~12,000 lines of Python across 58 files.
-Tests: 111 offline checks (free, ~8s) and 182 total (`python tests/run_evals.py`).
+Scale: ~11,700 lines of Python across 53 files.
+Tests: pytest. `pytest -m "not live and not llm"` is the free offline tier (~8s);
+`pytest` adds the live tool checks. See §Tests in README.md.
 
 ---
 
@@ -81,8 +82,7 @@ as a value.
 
 | File | Lines | Role |
 |---|---:|---|
-| `main.py` | 293 | FastAPI. `/chat`, `/chat/stream`, `/config`, `/config/test`, `/cache`, `/health`. **`/chat`, `/config` and `/config/test` are deliberately sync `def`, not `async`** — see §6. |
-| `models/schemas.py` | — | Dead code, never imported. Safe to delete. |
+| `main.py` | 227 | FastAPI. `/chat/stream`, `/config`, `/config/test`, `/health`. **`/config` and `/config/test` are deliberately sync `def`, not `async`** — see §6. |
 
 ### `backend/agent/` — orchestration
 
@@ -138,20 +138,20 @@ as a value.
 |---|---:|---|
 | `app.py` | 315 | Streamlit UI. Talks to `/chat/stream` only. Sidebar drives `/config`. |
 | `ceph_treemap.py` | 125 | CRUSH hierarchy as a treemap. Triggered by column sniffing, not tool name. |
-| `live_graph.py` | 108 | Draws the graph as it executes. |
+| `live_graph.py` | 85 | Draws the graph as it executes. |
 
 ### `tests/`
 
 | File | Lines | Role |
 |---|---:|---|
-| `test_units.py` | 1,512 | Offline tier. Free, ~8s. `SPENDS_TOKENS` names the one exception that calls a model. |
+| `test_units.py` | 1,501 | Offline tier. Free, ~8s. One test carries `.mark.llm` and is held back by default. |
 | `test_tools_live.py` | 855 | Live tool checks against the real systems. No model calls. |
 | `routing_cases.py` | 208 | `question -> expected tool` corpus, in three kinds: unambiguous, collisions, and should-ask. |
 | `score_routing.py` | 245 | Scores classify accuracy. Opt-in, spends tokens, `--only` narrows it. |
 | `golden_queries.py` | 257 | Argument-level query sets and the team's real sample questions. |
-| `run_evals.py` | 127 | The harness. `--offline`, `--llm`, `--routing`, `-k`. |
 | `test_extraction_llm.py` | 124 | NL → argument extraction evals. Paced, spends tokens. |
-| `conftest.py` | 44 | Path + env bootstrap. **Applies `credentials.json`** — anything touching tools needs this. |
+| `conftest.py` | 44 | Path + env bootstrap, auto-loaded by pytest. **Applies `credentials.json`** — anything touching tools needs this. |
+| `pytest.ini` | — | At the repo root. `testpaths = tests` and `addopts = -m "not llm"`, so the default run never spends tokens. |
 
 ---
 
@@ -380,12 +380,13 @@ deterministic floor runs just lets the floor set it back.
 jammy using?" routed to `query_ceph` alone, which silently dropped "jammy" and answered
 with cluster-wide capacity. Ceph cannot resolve a VM name — only pool names and UUIDs.
 
-**Three endpoints held the event loop.** `/chat`, `/config` and `/config/test` were
-`async def` while doing blocking work, so one request froze everything including
-`/health`. Now plain `def`, which FastAPI runs in a worker thread.
+**Three endpoints held the event loop.** `/chat` (since removed), `/config` and
+`/config/test` were `async def` while doing blocking work, so one request froze
+everything including `/health`. Now plain `def`, which FastAPI runs in a worker thread.
 
-**The `--offline` tier was not free.** It advertised "no network" while one test ran
-the compiled graph. Modules now declare `SPENDS_TOKENS`.
+**The offline tier was not free.** It advertised "no network" while one test ran the
+compiled graph. That test now carries `@pytest.mark.llm`, and `pytest.ini` excludes
+the marker by default.
 
 **The loop guard was defeated by what followed it.** `LOOP_SUMMARY_CHARS` trimmed the
 summary to 1,200, then an **untruncated** row preview was appended right after —
@@ -450,9 +451,8 @@ Detailed plans exist in `~/.claude/plans/groovy-mapping-rabbit.md`.
 
 ### Housekeeping
 
-Delete `backend/models/schemas.py` (never imported); add logging (there is still no
-`import logging` anywhere); pin dependencies; add auth to the API; remove hardcoded IP
-fallbacks; cap `raw` payloads.
+Add logging (there is still no `import logging` anywhere); pin dependencies; add auth
+to the API; remove hardcoded IP fallbacks; cap `raw` payloads.
 
 ### The bigger question, honestly
 
@@ -473,8 +473,8 @@ variable, and `score_routing.py` can measure whether a stronger model fixes them
    time**: Zabbix inventory switched off, Ceph RGW not deployed, Zammad ticket links
    unused, and this session the "Ceph log index" that contains no cluster events.
 2. **Prefer code to prompting** for anything checkable.
-3. **Run the evals after every change** — `python tests/run_evals.py --offline` (111
-   checks, ~8s, free) while iterating; the full suite before committing.
+3. **Run the evals after every change** — `pytest -m "not live and not llm"` (~8s,
+   free) while iterating; `pytest` before committing.
 4. **Watch both budgets.** Test the tool layer directly; it is free.
 5. **Keep the domain routing rules intact.** Blurring the systems produces confidently
    wrong answers. "How many VMs" is Prometheus, not Ceph.

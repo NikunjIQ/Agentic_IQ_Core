@@ -1,18 +1,16 @@
 import os
 import requests
-import time
 from requests.auth import HTTPBasicAuth
 
-# Cache dictionary to store metadata and prevent spamming APIs
-_METADATA_CACHE = {
-    "data": None,
-    "last_fetched": 0,
-    # The same fetch, kept as values rather than prose. Clarifying questions must
-    # offer real host groups and states, so they need the list, not the sentence.
-    "options": {},
-}
+from tools.clients import Cached
 
 CACHE_TTL_SECONDS = 300  # Cache metadata for 5 minutes
+
+# The schema prose and the same fetch kept as values, under one timestamp:
+# clarifying questions must offer real host groups and states, so they need the
+# list, not the sentence. Holding both together is what stops the two halves
+# expiring separately.
+_METADATA_CACHE = Cached("live schema", CACHE_TTL_SECONDS)
 
 def fetch_live_metadata() -> str:
     """
@@ -20,12 +18,10 @@ def fetch_live_metadata() -> str:
     Returns a formatted string to inject into LLM prompts.
     Uses a 5-minute cache to reduce API load.
     """
-    global _METADATA_CACHE
-    current_time = time.time()
-    
-    if _METADATA_CACHE["data"] and (current_time - _METADATA_CACHE["last_fetched"]) < CACHE_TTL_SECONDS:
-        return _METADATA_CACHE["data"]
-        
+    cached = _METADATA_CACHE.get()
+    if cached:
+        return cached["schema"]
+
     try:
         from agent.config_store import ensure_applied
         ensure_applied()
@@ -96,12 +92,7 @@ def fetch_live_metadata() -> str:
         metadata_lines.append(f"- PROMETHEUS: (Failed to fetch: {str(e)[:80]})")
 
     final_schema = "\n".join(metadata_lines)
-    
-    # Update Cache
-    _METADATA_CACHE["data"] = final_schema
-    _METADATA_CACHE["options"] = options
-    _METADATA_CACHE["last_fetched"] = current_time
-
+    _METADATA_CACHE.put({"schema": final_schema, "options": options})
     return final_schema
 
 
@@ -111,9 +102,11 @@ def live_options() -> dict:
     Shares the 5-minute cache with fetch_live_metadata, so asking the user a
     question costs no extra API calls.
     """
-    if not _METADATA_CACHE["options"]:
+    cached = _METADATA_CACHE.get()
+    if not cached:
         fetch_live_metadata()
-    return dict(_METADATA_CACHE["options"])
+        cached = _METADATA_CACHE.get() or {}
+    return dict(cached.get("options") or {})
 
 if __name__ == "__main__":
     from dotenv import load_dotenv

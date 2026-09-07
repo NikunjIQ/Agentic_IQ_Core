@@ -17,13 +17,12 @@ TICKET" row instead of dropping it.
 """
 
 import re
-import time
 from typing import Optional
 
 import pandas as pd
 from langchain_core.tools import tool
 
-from tools.clients import CephClient, PrometheusClient
+from tools.clients import Cached, CephClient, PrometheusClient
 
 GB = 1e9
 
@@ -33,8 +32,8 @@ GB = 1e9
 # for one caller.
 _UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
-_CACHE = {"data": None, "fetched_at": 0.0}
 CACHE_TTL = 60
+_CACHE = Cached("vm storage join", CACHE_TTL)
 
 
 def _ceph_vm_images(images: list) -> dict:
@@ -90,10 +89,10 @@ def _prometheus_vm_compute(client, domain: str, vcpu_count: float) -> dict:
 
 def correlate_vm_storage(vm_filter: Optional[str] = None) -> pd.DataFrame:
     """One row per VM Prometheus knows about, joined to its Ceph disk if any."""
-    now = time.time()
-    if (_CACHE["data"] is not None and vm_filter is None
-            and now - _CACHE["fetched_at"] < CACHE_TTL):
-        return _CACHE["data"]
+    if vm_filter is None:
+        cached = _CACHE.get()
+        if cached is not None:
+            return cached
 
     from tools.prometheus_tool import _vm_inventory
     prom = PrometheusClient()
@@ -136,8 +135,7 @@ def correlate_vm_storage(vm_filter: Optional[str] = None) -> pd.DataFrame:
 
     df = pd.DataFrame(rows)
     if vm_filter is None:
-        _CACHE["data"] = df
-        _CACHE["fetched_at"] = now
+        _CACHE.put(df)
     return df
 
 

@@ -97,7 +97,6 @@ TOOL_REGISTRY = {
         # Falls back to the full description so a newly registered tool is
         # routable before anyone writes its summary.
         "routing_summary": ROUTING_SUMMARIES.get(tool_obj.name, tool_obj.description),
-        "tool_object": tool_obj
     }
     for tool_obj in LANGCHAIN_TOOLS
 }

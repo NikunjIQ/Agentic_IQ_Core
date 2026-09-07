@@ -1,0 +1,2 @@
+# Test-only dependencies. The app itself needs none of these.
+pytest

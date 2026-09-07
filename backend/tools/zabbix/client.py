@@ -2,8 +2,6 @@
 
 import os
 
-import requests
-
 from tools import clients
 
 

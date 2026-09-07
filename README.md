@@ -225,15 +225,18 @@ than a smaller total.
 ## Tests
 
 ```bash
-python tests/run_evals.py --offline    # 111 checks, ~8s, free
-python tests/run_evals.py              # + live tool checks against the real systems
-python tests/run_evals.py --llm        # + extraction evals (spends tokens)
-python tests/run_evals.py --routing    # score which system each question routes to
+pip install -r tests/requirements.txt
+
+pytest -m "not live and not llm"   # offline wiring and unit checks, ~8s, free
+pytest                             # + live tool checks against the real systems
+pytest -m ""                       # + extraction evals (SPENDS TOKENS)
+python tests/score_routing.py      # score which system each question routes to
 ```
 
-Three tiers: offline wiring and unit checks, live tool checks, and opt-in evals that
-spend tokens. The offline tier is genuinely free — a module names any token-spending
-test in `SPENDS_TOKENS` and the harness holds it back.
+Three tiers, selected by marker: offline wiring and unit checks, `live` checks against
+the real estate, and `llm` evals that spend tokens. `pytest.ini` sets
+`addopts = -m "not llm"`, so **the default run never calls a model** — opting in is a
+deliberate act.
 
 `tests/score_routing.py` reports routing accuracy: right system, right complexity, how
 often it asked when it should have routed, and tokens per decision. **Use `--only` to

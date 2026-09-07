@@ -1,4 +1,4 @@
-"""Natural-language -> tool-argument accuracy. Costs tokens; opt in with --llm.
+"""Natural-language -> tool-argument accuracy. Costs tokens; opt in with `-m llm`.
 
 This is the layer that regresses invisibly. Editing one sentence of a docstring
 once changed "How many tickets are in Open State?" from 22 tickets to 3,784,
@@ -11,9 +11,10 @@ writes, because arguments are checkable and prose is not.
 import os
 import time
 
-import conftest  # noqa: F401
+import pytest
 
-REQUIRES_LLM = True
+# Every case here calls a model. Held back from the default run by pytest.ini.
+pytestmark = [pytest.mark.llm, pytest.mark.live]
 
 # Seconds between extraction cases. Overridable so a run can be paced differently
 # without editing the file: IQCORE_EVAL_PACING=2 on a higher rate limit.

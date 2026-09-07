@@ -2,10 +2,9 @@ import os
 import re
 import json
 import threading
-from typing import Any
 from datetime import datetime
 from fastapi import FastAPI
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from dotenv import load_dotenv
 import pandas as pd
@@ -30,13 +29,6 @@ _applied = config_store.apply_to_environment()
 class ChatRequest(BaseModel):
     question: str
     conversation_history: list[dict] = []
-
-class ChatResponse(BaseModel):
-    final_answer: str
-    dataframes: list[Any]
-    tools_called: list[str]
-    tool_results_raw: list[dict]
-    complexity: str
 
 def safe_serialize(obj):
     if isinstance(obj, float):
@@ -80,56 +72,9 @@ def _explain_failure(error: Exception) -> str:
     return f"Something went wrong while answering: {type(error).__name__}: {text[:300]}"
 
 
-@app.post("/chat")
-def chat(request: ChatRequest):
-    """Deliberately NOT async.
-
-    The graph is synchronous and a cold Zammad question takes ~43 seconds.
-    Declared `async def`, that ran on the event loop and blocked every other
-    request for the duration, `/health` included, so the one call you would make
-    to ask whether the server was alive was the one that could not be answered.
-
-    FastAPI runs a plain `def` endpoint in a worker thread, which is the same
-    thing /chat/stream arranges by hand. Keeping it sync also keeps telemetry
-    working: the recorder is a contextvar, so `telemetry.start()` and
-    `telemetry.summary()` have to happen on the thread the graph ran on.
-    """
-    cached = answer_cache.get(request.question, request.conversation_history)
-    if cached is not None:
-        return JSONResponse(content=cached)
-
-    initial_state = {
-        "question": request.question,
-        "conversation_history": request.conversation_history,
-        "complexity": None,
-        "simple_tool_choice": None,
-        "tool_results_raw": [],
-        "dataframes": [],
-        "tools_called": [],
-        "final_answer": None,
-    }
-    telemetry.start()
-    try:
-        result_state = COMPILED_GRAPH.invoke(initial_state)
-    except Exception as exc:
-        # Answer with an explanation rather than a 500 the frontend cannot interpret.
-        return JSONResponse(content={
-            "final_answer": _explain_failure(exc),
-            "dataframes": [],
-            "tools_called": [],
-            "tool_results_raw": [{"error": f"{type(exc).__name__}: {str(exc)[:500]}"}],
-            "complexity": "error",
-        })
-
-    serialised = _serialise_state(result_state)
-    # Cache only what actually serialised — anything stored is replayed verbatim,
-    # so it has to be known-good JSON.
-    answer_cache.put(request.question, serialised, request.conversation_history)
-    return JSONResponse(content=serialised)
-
 
 def _serialise_state(result_state: dict) -> dict:
-    """Graph state -> JSON the frontend can render. Shared by both endpoints."""
+    """Graph state -> JSON the frontend can render."""
     serialized_dfs = []
     for df in result_state.get("dataframes", []):
         if isinstance(df, pd.DataFrame):
@@ -278,16 +223,5 @@ def save_config(request: ConfigRequest):
     result["results"] = config_test.test_all(merged, request.systems or None)
     return result
 
-
-@app.get("/cache")
-async def cache_stats():
-    """Cache hit rate — the cheapest signal for how much token spend is avoided."""
-    return answer_cache.stats()
-
-
-@app.post("/cache/clear")
-async def cache_clear():
-    answer_cache.clear()
-    return {"status": "cleared"}
 
 

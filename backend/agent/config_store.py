@@ -115,32 +115,20 @@ def reset_caches() -> list:
 
     Without this the app keeps serving tickets, devices and schema fetched with
     the previous credentials, which looks like the new settings silently failing.
+
+    The TTL caches register themselves with tools.clients.Cached, so this cannot
+    miss one the way naming each module's private dict could — an earlier
+    version cleared the live schema but not the host-group and ticket-state
+    options cached alongside it, so clarifying questions kept offering values
+    from the old system.
     """
     cleared = []
 
     try:
-        from tools import clients
-        clients._TICKET_CACHE["tickets"] = None
-        clients._TICKET_CACHE["fetched_at"] = 0.0
-        clients._PROM_NODE_CACHE["map"] = None
-        clients._PROM_NODE_CACHE["fetched_at"] = 0.0
-        cleared += ["zammad tickets", "prometheus nodes"]
-    except Exception:
-        pass
-
-    try:
-        from agent import metadata
-        metadata._METADATA_CACHE["data"] = None
-        metadata._METADATA_CACHE["last_fetched"] = 0
-        cleared.append("live schema")
-    except Exception:
-        pass
-
-    try:
-        from tools import correlation
-        correlation._DEVICE_CACHE["data"] = None
-        correlation._DEVICE_CACHE["fetched_at"] = 0
-        cleared.append("device index")
+        # Imports the tool layer, which reads credentials at call time.
+        from tools import clients, correlation, vm_storage_correlation  # noqa: F401
+        from agent import metadata                                     # noqa: F401
+        cleared += clients.Cached.clear_all()
     except Exception:
         pass
 

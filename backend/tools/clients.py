@@ -98,6 +98,56 @@ SEVERITY_LABELS = {
 TICKET_ID_TAG = "__zbx_zammad_ticket_id"
 TICKET_LINK_TAG = "__zbx_zammad_ticketlink"
 
+
+class Cached:
+    """One value with a TTL, plus a registry so every cache can be dropped at once.
+
+    Five lookups across the app had each grown the same
+    {"value": ..., "fetched_at": ...} pattern, and config_store.reset_caches had
+    to reach into four modules by name to clear them — inside a bare `except`,
+    so renaming a key there fails silently and the app keeps serving data
+    fetched with the previous credentials. Registering here makes that
+    impossible to get wrong.
+    """
+
+    _registry = []
+
+    def __init__(self, name: str, ttl):
+        # `ttl` may be a number or a callable, so a value read from the
+        # environment once at import and one that can change are both sayable.
+        self.name = name
+        self._ttl = ttl
+        self.value = None
+        self.stored_at = 0.0
+        Cached._registry.append(self)
+
+    @property
+    def ttl(self) -> float:
+        return self._ttl() if callable(self._ttl) else self._ttl
+
+    def get(self):
+        """The cached value, or None when it is absent or has expired."""
+        if self.value is not None and time.time() - self.stored_at < self.ttl:
+            return self.value
+        return None
+
+    def put(self, value):
+        self.value = value
+        self.stored_at = time.time()
+        return value
+
+    def clear(self):
+        self.value = None
+        self.stored_at = 0.0
+
+    @classmethod
+    def clear_all(cls) -> list:
+        """Drop every registered cache; returns their names, for the UI."""
+        for cache in cls._registry:
+            cache.clear()
+        return [cache.name for cache in cls._registry]
+
+
 # Pulling the whole ticket estate takes 12-30s. A question that needs two cuts of
 # the same data should not pay for it twice.
 #
@@ -107,22 +157,8 @@ TICKET_LINK_TAG = "__zbx_zammad_ticketlink"
 # re-download 3,788 tickets four or five times. That is a test concern only —
 # changing the default would trade the app's freshness for speed, which is a
 # separate decision.
-_TICKET_CACHE = {"tickets": None, "fetched_at": 0.0}
 TICKET_CACHE_TTL = int(os.getenv("ZAMMAD_CACHE_TTL", "60"))
-
-
-def _ticket_cache_get():
-    import time
-    if (_TICKET_CACHE["tickets"] is not None
-            and time.time() - _TICKET_CACHE["fetched_at"] < TICKET_CACHE_TTL):
-        return _TICKET_CACHE["tickets"]
-    return None
-
-
-def _ticket_cache_put(tickets):
-    import time
-    _TICKET_CACHE["tickets"] = tickets
-    _TICKET_CACHE["fetched_at"] = time.time()
+_TICKET_CACHE = Cached("zammad tickets", TICKET_CACHE_TTL)
 
 
 # ---------------------------------------------------------------------------
@@ -219,8 +255,8 @@ class ZabbixClient:
 # ---------------------------------------------------------------------------
 # Prometheus
 # ---------------------------------------------------------------------------
-_PROM_NODE_CACHE = {"map": None, "fetched_at": 0.0}
 PROM_NODE_CACHE_TTL = 300
+_PROM_NODE_CACHE = Cached("prometheus nodes", PROM_NODE_CACHE_TTL)
 
 
 class PrometheusClient:
@@ -265,19 +301,15 @@ class PrometheusClient:
     def metric_names(self) -> list:
         return self.api("label/__name__/values") or []
 
-    def label_values(self, label: str) -> list:
-        return self.api(f"label/{label}/values") or []
-
     def node_map(self) -> dict:
         """Friendly hostname -> instance address, from node_uname_info.
 
         People ask about "server02", not "192.168.1.30:9100". Without this the
         host filter can only match raw addresses.
         """
-        now = time.time()
-        if (_PROM_NODE_CACHE["map"] is not None
-                and now - _PROM_NODE_CACHE["fetched_at"] < PROM_NODE_CACHE_TTL):
-            return _PROM_NODE_CACHE["map"]
+        cached = _PROM_NODE_CACHE.get()
+        if cached is not None:
+            return cached
 
         mapping = {}
         try:
@@ -289,9 +321,7 @@ class PrometheusClient:
         except Exception:
             pass
 
-        _PROM_NODE_CACHE["map"] = mapping
-        _PROM_NODE_CACHE["fetched_at"] = now
-        return mapping
+        return _PROM_NODE_CACHE.put(mapping)
 
 
 # ---------------------------------------------------------------------------
@@ -526,7 +556,7 @@ class ZammadClient:
         The previous fixed range of 44 pages was already within 7 pages of this
         estate's size; past that it would have dropped tickets with no error.
         """
-        cached = _ticket_cache_get()
+        cached = _TICKET_CACHE.get()
         if cached is not None:
             return cached
 
@@ -543,7 +573,7 @@ class ZammadClient:
         if not tickets:  # search fallback, mirrors the original behaviour
             tickets = self.search("*", limit=1000)
 
-        _ticket_cache_put(tickets)
+        _TICKET_CACHE.put(tickets)
         return tickets
 
     def search(self, query: str, limit: int = 50) -> list:

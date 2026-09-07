@@ -33,16 +33,3 @@ def recent_turns(conversation_history, max_turns: int = MAX_TURNS) -> list:
             text = text[:MAX_CHARS_PER_TURN] + " …[truncated]"
         turns.append({"role": role, "content": text})
     return turns
-
-
-def followup_context(conversation_history, max_turns: int = MAX_TURNS) -> str:
-    """A compact transcript for prompts that take a single user message.
-
-    The synthesis step sends one composed user message rather than a message
-    list, so it needs the history inline to resolve "what about server02?".
-    """
-    turns = recent_turns(conversation_history, max_turns)
-    if not turns:
-        return ""
-    lines = [f"{turn['role']}: {turn['content']}" for turn in turns]
-    return "\n".join(lines)

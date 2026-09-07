@@ -1,7 +1,7 @@
 """Test bootstrap: put `backend` on the path and load real credentials.
 
-Imported by run_evals.py directly, and picked up automatically by pytest if it
-is ever installed.
+Picked up automatically by pytest, and imported directly by score_routing.py,
+which is a standalone script rather than a test module.
 """
 
 import os
