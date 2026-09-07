@@ -114,6 +114,39 @@ def render_results(results: dict):
             st.error(f"**{system}** — {outcome['message']}", icon="❌")
 
 
+# ---------------------------------------------------------------- pricing
+# What a token is sold for, in paise. The one number to change: every figure on
+# screen is this multiplied by a token count Groq reported, so there is nothing
+# else to keep in step.
+#
+# 2 paise/token means a 5,000-token question costs ₹100. This is a SELLING
+# price, not what Groq charges — the point is to know what a query is worth
+# before committing to a subscription tier.
+PAISE_PER_TOKEN = 2
+
+
+def rupees(tokens: int) -> str:
+    """Token count as a rupee amount, e.g. 5000 -> '₹100.00'."""
+    return f"₹{(tokens or 0) * PAISE_PER_TOKEN / 100:,.2f}"
+
+
+def session_spend() -> tuple:
+    """(answers, tokens, cost) across the whole session, from the kept payloads.
+
+    A single query's price is too noisy to plan a tier on — a clarifying turn is
+    1,400 tokens and a four-step correlation is 30,000. The running total is the
+    number a subscription has to be priced against.
+    """
+    answered, tokens = 0, 0
+    for payload in st.session_state.payloads.values():
+        telemetry = (payload or {}).get("telemetry") or {}
+        # A cache hit spent nothing, and billing it again would overstate the
+        # session — but it was still an answer the user received.
+        answered += 1
+        tokens += telemetry.get("total_tokens", 0)
+    return answered, tokens, rupees(tokens)
+
+
 def render_payload(result: dict):
     """Everything under an answer: tables, treemap, token breakdown, debug.
 
@@ -148,12 +181,14 @@ def render_payload(result: dict):
     telemetry = result.get("telemetry") or {}
     if telemetry.get("served_from_cache"):
         st.caption(
-            f"🎫 0 tokens — served from cache "
-            f"(cost {telemetry.get('original_total_tokens', 0):,} when first asked)")
+            f"🎫 0 tokens · ₹0.00 — served from cache "
+            f"(cost {telemetry.get('original_total_tokens', 0):,} tokens / "
+            f"{rupees(telemetry.get('original_total_tokens', 0))} when first asked)")
     elif telemetry.get("calls"):
         budget = telemetry.get("minute_budget_pct", 0)
         st.caption(
             f"🎫 {telemetry['total_tokens']:,} tokens · "
+            f"**{rupees(telemetry['total_tokens'])}** · "
             f"{budget:.0f}% of a minute's allowance · "
             f"{telemetry['model_calls']} model call(s) · "
             f"{telemetry['seconds']:.1f}s"
@@ -163,7 +198,8 @@ def render_payload(result: dict):
             st.markdown("**Where the tokens went**")
             st.dataframe(pd.DataFrame([
                 {"Operation": e["label"], "Calls": e["calls"],
-                 "Tokens": e["total_tokens"], "Share": f"{e['share_pct']}%"}
+                 "Tokens": e["total_tokens"], "Cost": rupees(e["total_tokens"]),
+                 "Share": f"{e['share_pct']}%"}
                 for e in telemetry.get("by_operation", [])
             ]), use_container_width=True, hide_index=True)
 
@@ -369,6 +405,23 @@ def chat_page():
                 st.session_state.pending_question = suggestion
                 st.session_state.suggestions = []
                 st.rerun()
+
+
+    # Drawn last, though it appears in the sidebar: `with st.sidebar` appends
+    # wherever it is called, and the turn above is what writes this turn's
+    # payload. Rendered with the rest of the sidebar it would show the total as
+    # it stood BEFORE the answer just given, always one question behind.
+    with st.sidebar:
+        # One query is too noisy to price a plan on — a clarifying turn is
+        # ~1,400 tokens and a four-step correlation ~30,000 — so the running
+        # total and the average are the figures a tier has to be built from.
+        answered, tokens, cost = session_spend()
+        if answered:
+            st.divider()
+            st.metric("Session cost", cost,
+                      help=f"{tokens:,} tokens at {PAISE_PER_TOKEN}p each")
+            st.caption(f"{answered} answer(s) · avg {tokens // answered:,} tokens "
+                       f"· {rupees(tokens // answered)} per query")
 
 
 # Real pages rather than a session-state flag: this gives each one a URL, so
