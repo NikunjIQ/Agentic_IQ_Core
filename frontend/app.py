@@ -204,9 +204,16 @@ def render_payload(result: dict):
             st.json(entry.get("result", {}))
 
 
-# ---------------------------------------------------------------- sidebar
-with st.sidebar:
-    st.header("⚙️ Connection settings")
+# ---------------------------------------------------------------- connections
+def connections_page():
+    """Where the credentials are entered. Its own page, not the sidebar.
+
+    Six systems with four fields each does not fit a sidebar without becoming a
+    column of collapsed accordions, and it is a page you visit twice and then
+    never again — which is exactly what a nav entry is for and a sidebar is not.
+    """
+    st.title("⚙️ Connections")
+    st.caption("Credentials are stored on the server and applied without a restart.")
 
     try:
         config = backend("get", "/config", timeout=15)
@@ -269,75 +276,105 @@ with st.sidebar:
         render_results(st.session_state.test_results)
 
     st.divider()
-    st.toggle("Show the graph while it runs", key="show_live_graph",
-              help="Draws which node is executing and which tool is being called, "
-                   "live, as the answer is produced.")
     st.caption(f"Stored at `{config['path']}`")
-    if st.button("Clear chat", use_container_width=True):
-        st.session_state.conversation_history = []
-        st.session_state.payloads = {}
-        st.rerun()
 
 
 # ---------------------------------------------------------------- chat
-st.title("IQCore — IT Operations Assistant")
-
-for index, message in enumerate(st.session_state.conversation_history):
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
-        # Redraw this turn's tables. Streamlit rebuilds the page from scratch on
-        # every question, so an answer's tables only survive if they are drawn
-        # again here from what was kept.
-        render_payload(st.session_state.payloads.get(index))
-
-typed = st.chat_input("Ask about tickets, infrastructure, VMs or logs...")
-# A clicked suggestion is just a question the user did not have to type.
-user_input = st.session_state.pending_question or typed
-st.session_state.pending_question = None
-
-if user_input:
-    with st.chat_message("user"):
-        st.markdown(user_input)
-
-    with st.chat_message("assistant"):
-        status_holder = st.empty()
-        # The graph is drawn above the answer so the route is visible while the
-        # tools are still running, which is where the seconds actually go.
-        graph_holder = st.empty() if st.session_state.get("show_live_graph") else None
-        result = {}
-        try:
-            answer = st.write_stream(stream_answer(
-                user_input, st.session_state.conversation_history, result, status_holder,
-                graph_holder))
-            status_holder.empty()
-
-            render_payload(result)
-
-            st.session_state.conversation_history += [
-                {"role": "user", "content": user_input},
-                {"role": "assistant", "content": answer or result.get("final_answer", "")},
-            ]
-            # Keyed by the assistant message's position, NOT stored inside the
-            # message: complex_path.py splices conversation_history straight into
-            # the Groq request, so a table parked in there would be sent to the
-            # model as message content, against an 8k-per-minute cap.
-            st.session_state.payloads[
-                len(st.session_state.conversation_history) - 1] = result
-            st.session_state.suggestions = result.get("suggestions", [])
-        except Exception as exc:
-            status_holder.empty()
-            st.session_state.suggestions = []
-            st.error(f"Error communicating with backend: {exc}")
-
-# Follow-ups for the most recent answer. Rendered outside the message block so
-# they survive the rerun a click causes, and computed by the backend with no
-# model call — a chip costs nothing to offer.
-if st.session_state.suggestions:
-    st.caption("Next:")
-    columns = st.columns(len(st.session_state.suggestions))
-    for column, suggestion in zip(columns, st.session_state.suggestions):
-        if column.button(suggestion, key=f"chip_{hash(suggestion)}",
-                         use_container_width=True):
-            st.session_state.pending_question = suggestion
-            st.session_state.suggestions = []
+def chat_page():
+    with st.sidebar:
+        # Seeded from plain session state and written back, rather than carried by
+        # a widget `key`. Streamlit drops a keyed widget's state on any run that
+        # does not render it, and the Connections page does not — so a `key` here
+        # silently reverted the toggle to st.toggle's own default of False every
+        # time you visited Connections and came back.
+        st.session_state.show_live_graph = st.toggle(
+            "Show the graph while it runs",
+            value=st.session_state.show_live_graph,
+            help="Draws which node is executing and which tool is being called, "
+                 "live, as the answer is produced.")
+        if st.button("Clear chat", use_container_width=True):
+            st.session_state.conversation_history = []
+            st.session_state.payloads = {}
             st.rerun()
+
+    # A fresh install has no credentials, and the form is no longer sitting in
+    # front of the user, so say where it went. Silent if the backend cannot be
+    # reached — the chat reports that per question, and blocking the whole page
+    # on it would make an unreachable backend look like a broken app.
+    try:
+        if not backend("get", "/config", timeout=5)["configured"]:
+            st.warning("No systems are configured yet — open **Connections** "
+                       "above to add them.", icon="⚠️")
+    except Exception:
+        pass
+
+    st.title("IQCore — IT Operations Assistant")
+
+    for index, message in enumerate(st.session_state.conversation_history):
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+            # Redraw this turn's tables. Streamlit rebuilds the page from scratch on
+            # every question, so an answer's tables only survive if they are drawn
+            # again here from what was kept.
+            render_payload(st.session_state.payloads.get(index))
+
+    typed = st.chat_input("Ask about tickets, infrastructure, VMs or logs...")
+    # A clicked suggestion is just a question the user did not have to type.
+    user_input = st.session_state.pending_question or typed
+    st.session_state.pending_question = None
+
+    if user_input:
+        with st.chat_message("user"):
+            st.markdown(user_input)
+
+        with st.chat_message("assistant"):
+            status_holder = st.empty()
+            # The graph is drawn above the answer so the route is visible while the
+            # tools are still running, which is where the seconds actually go.
+            graph_holder = st.empty() if st.session_state.get("show_live_graph") else None
+            result = {}
+            try:
+                answer = st.write_stream(stream_answer(
+                    user_input, st.session_state.conversation_history, result, status_holder,
+                    graph_holder))
+                status_holder.empty()
+
+                render_payload(result)
+
+                st.session_state.conversation_history += [
+                    {"role": "user", "content": user_input},
+                    {"role": "assistant", "content": answer or result.get("final_answer", "")},
+                ]
+                # Keyed by the assistant message's position, NOT stored inside the
+                # message: complex_path.py splices conversation_history straight into
+                # the Groq request, so a table parked in there would be sent to the
+                # model as message content, against an 8k-per-minute cap.
+                st.session_state.payloads[
+                    len(st.session_state.conversation_history) - 1] = result
+                st.session_state.suggestions = result.get("suggestions", [])
+            except Exception as exc:
+                status_holder.empty()
+                st.session_state.suggestions = []
+                st.error(f"Error communicating with backend: {exc}")
+
+    # Follow-ups for the most recent answer. Rendered outside the message block so
+    # they survive the rerun a click causes, and computed by the backend with no
+    # model call — a chip costs nothing to offer.
+    if st.session_state.suggestions:
+        st.caption("Next:")
+        columns = st.columns(len(st.session_state.suggestions))
+        for column, suggestion in zip(columns, st.session_state.suggestions):
+            if column.button(suggestion, key=f"chip_{hash(suggestion)}",
+                             use_container_width=True):
+                st.session_state.pending_question = suggestion
+                st.session_state.suggestions = []
+                st.rerun()
+
+
+# Real pages rather than a session-state flag: this gives each one a URL, so
+# the browser's back button and a bookmarked /connections both work.
+st.navigation([
+    st.Page(chat_page, title="Chat", icon="💬", default=True),
+    st.Page(connections_page, title="Connections", icon="⚙️",
+            url_path="connections"),
+], position="top").run()
