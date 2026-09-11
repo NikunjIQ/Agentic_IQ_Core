@@ -2,16 +2,10 @@
   "version": "0.0.1",
   "configurations": [
     {
-      "name": "iqcore-backend",
+      "name": "iqcore",
       "runtimeExecutable": ".venv/Scripts/python.exe",
       "runtimeArgs": ["-m", "uvicorn", "main:app", "--host", "127.0.0.1", "--port", "8000", "--app-dir", "backend"],
       "port": 8000
-    },
-    {
-      "name": "iqcore-frontend",
-      "runtimeExecutable": ".venv/Scripts/python.exe",
-      "runtimeArgs": ["-m", "streamlit", "run", "frontend/app.py", "--server.port", "8501", "--server.headless", "true"],
-      "port": 8501
     }
   ]
 }

@@ -6,6 +6,7 @@
 .env.*
 !.env.example
 credentials.json
+authentication.json
 **/.streamlit/secrets.toml
 secrets.toml
 *.pem

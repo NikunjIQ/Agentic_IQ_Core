@@ -1499,3 +1499,40 @@ def test_ceph_daemon_client_forces_a_real_total():
     import inspect
     from tools.clients import CephDaemonLogClient
     assert "track_total_hits" in inspect.getsource(CephDaemonLogClient.search)
+
+
+# --- the makeshift login gate -----------------------------------------------
+def test_auth_store_round_trip(tmp_path=None):
+    """Signup, login, and the three ways login must fail.
+
+    A gate this simple is exactly the kind of thing that quietly stops checking
+    the password, so the negative cases matter more than the positive one.
+    """
+    import importlib
+    import json
+    import os
+    import tempfile
+
+    os.environ["IQCORE_AUTH_PATH"] = os.path.join(tempfile.mkdtemp(), "authentication.json")
+    from agent import auth_store
+    importlib.reload(auth_store)          # pick up the redirected path
+
+    assert auth_store.user_count() == 0
+    assert not auth_store.login("nikunj", "secret123")["ok"], "no accounts yet"
+
+    assert auth_store.signup("nikunj", "secret123")["ok"]
+    assert auth_store.login("nikunj", "secret123")["ok"]
+    assert auth_store.login("NIKUNJ", "secret123")["ok"], "usernames match case-insensitively"
+
+    assert not auth_store.login("nikunj", "wrong")["ok"]
+    assert not auth_store.login("someone", "secret123")["ok"]
+    assert not auth_store.signup("nikunj", "another1")["ok"], "duplicate username"
+    assert not auth_store.signup("ab", "secret123")["ok"], "username too short"
+    assert not auth_store.signup("valid", "123")["ok"], "password too short"
+
+    assert auth_store.signup("second", "secret123")["ok"]
+    assert auth_store.user_count() == 2
+
+    stored = json.loads(open(os.environ["IQCORE_AUTH_PATH"], encoding="utf-8").read())
+    assert "secret123" not in json.dumps(stored), "passwords must never be stored in clear"
+    assert {"username", "salt", "hash", "created"} == set(stored["users"][0])

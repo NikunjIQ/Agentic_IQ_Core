@@ -3,16 +3,19 @@ import re
 import json
 import threading
 from datetime import datetime
+from pathlib import Path
+
 from fastapi import FastAPI
-from fastapi.responses import StreamingResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from dotenv import load_dotenv
 import pandas as pd
 import numpy as np
 
 from agent.graph import COMPILED_GRAPH
-from agent import (answer_cache, config_store, config_test, streaming,
-                   suggestions, telemetry)
+from agent import (answer_cache, auth_store, config_store, config_test,
+                   streaming, suggestions, telemetry)
 
 load_dotenv()
 
@@ -116,6 +119,30 @@ def _serialise_state(result_state: dict) -> dict:
             "coverage_notes": payload["coverage_notes"],
             "suggestions": payload["suggestions"],
         }
+
+class AuthRequest(BaseModel):
+    username: str = ""
+    password: str = ""
+
+
+@app.get("/auth/status")
+async def auth_status():
+    """Whether any account exists, so a fresh install can offer sign-up first."""
+    return {"accounts": auth_store.user_count()}
+
+
+@app.post("/auth/login")
+def auth_login(request: AuthRequest):
+    """Sync, not async: the password hash is 200k rounds of PBKDF2, which is CPU
+    work that would sit on the event loop and stall every other request."""
+    return auth_store.login(request.username, request.password)
+
+
+@app.post("/auth/signup")
+def auth_signup(request: AuthRequest):
+    """Sync for the same reason as /auth/login."""
+    return auth_store.signup(request.username, request.password)
+
 
 @app.get("/health")
 async def health():
@@ -225,3 +252,29 @@ def save_config(request: ConfigRequest):
 
 
 
+# ---------------------------------------------------------------- the UI
+# Mounted LAST so every route above still wins: a mount at "/" is only reached
+# once nothing else matches. Serving the page from the API process is what
+# removes the second one — there is no separate frontend server, and no CORS
+# because it is all one origin.
+STATIC_DIR = Path(__file__).resolve().parent / "static"
+
+
+@app.get("/")
+def index():
+    """index.html with the asset links stamped by their own mtime.
+
+    Without this the browser keeps a cached app.css/app.js and an edit appears
+    not to have happened — which is indistinguishable from the change being
+    wrong, and cost real time before it was diagnosed. Three stat calls per page
+    load is cheaper than one person reloading in confusion.
+    """
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    for asset in ("app.css", "app.js"):
+        stamp = int((STATIC_DIR / asset).stat().st_mtime)
+        html = html.replace(f"/static/{asset}", f"/static/{asset}?v={stamp}")
+    return HTMLResponse(html, headers={"Cache-Control": "no-store"})
+
+
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="ui")

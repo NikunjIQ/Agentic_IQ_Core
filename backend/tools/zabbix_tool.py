@@ -100,7 +100,8 @@ def query_zabbix(
     if df is None:
         df = pd.DataFrame()
     if not df.empty:
-        # Streamlit and JSON serialisation both choke on nested cells.
+        # The JSON serialiser chokes on nested cells, and a table cell should be a
+        # value, not a structure.
         for col in df.columns:
             if df[col].apply(lambda x: isinstance(x, (list, dict))).any():
                 df[col] = df[col].astype(str)

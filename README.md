@@ -38,9 +38,9 @@ nothing about network devices — a zero result there means "not collected here"
 ## Architecture
 
 ```
-Streamlit (frontend/app.py)
+Browser (backend/static/) — one page, no build step
      |  POST /chat/stream
-FastAPI (backend/main.py)
+FastAPI (backend/main.py) — serves the API and the page
      |
 LangGraph:  classify -> [ clarify | simple_path | complex_path ] -> respond
                               |            |            |
@@ -136,12 +136,11 @@ git clone https://github.com/NikunjIQ/Agentic_IQ_Core.git
 cd Agentic_IQ_Core
 python3 -m venv venv && source venv/bin/activate
 pip install -r backend/requirements.txt
-pip install -r frontend/requirements.txt
 ```
 
 ### Configure — two options
 
-**Through the UI (recommended).** Start the app and use the sidebar. Enter each
+**Through the UI (recommended).** Start the app and open **Connections**. Enter each
 system's details, press **Test** to verify, then **Save**. Written to
 `backend/credentials.json` (gitignored).
 
@@ -156,11 +155,8 @@ Changing config clears every cache automatically.
 cd backend && uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 
-```bash
-cd frontend && streamlit run app.py --server.address 0.0.0.0 --server.port 8501
-```
-
-Open `http://localhost:8501`. Set `IQCORE_BACKEND_URL` if the backend is elsewhere.
+Open `http://localhost:8000`. One process serves both the API and the page, so
+there is no second server to start and no CORS to configure.
 
 ---
 

@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IQCore</title>
+<link rel="stylesheet" href="/static/app.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%23111'/><circle cx='16' cy='16' r='6' fill='none' stroke='%23fff' stroke-width='2.5'/></svg>">
+</head>
+<body>
+
+<!-- ------------------------------------------------------------------ gate -->
+<div class="gate" id="gate" hidden>
+  <div class="gate-card">
+    <span class="brand">IQCore</span>
+    <h1 id="gate-title">Sign in</h1>
+    <p class="lede" id="gate-lede">Ask across Zabbix, Zammad, Prometheus, Ceph and OpenSearch.</p>
+
+    <form id="gate-form">
+      <label>
+        <span class="lab">Username</span>
+        <input type="text" id="gate-user" autocomplete="username" autocapitalize="none"
+               spellcheck="false" required>
+      </label>
+      <label>
+        <span class="lab">Password</span>
+        <input type="password" id="gate-pass" autocomplete="current-password" required>
+      </label>
+      <div class="note bad" id="gate-error" hidden></div>
+      <button class="btn" type="submit" id="gate-submit">Sign in</button>
+    </form>
+
+    <p class="gate-switch">
+      <span id="gate-switch-text">No account yet?</span>
+      <button type="button" class="linkish" id="gate-switch">Create one</button>
+    </p>
+    <p class="footnote">
+      A placeholder gate, not real authentication — it hides the interface, it
+      does not protect the API.
+    </p>
+  </div>
+</div>
+
+<header class="topbar" id="chrome">
+  <span class="brand">IQCore</span>
+  <nav class="tabs">
+    <button class="tab" data-page="chat" aria-current="page">Chat</button>
+    <button class="tab" data-page="connections">Connections</button>
+  </nav>
+  <div class="spend" id="spend"></div>
+</header>
+
+<!-- ------------------------------------------------------------------ chat -->
+<main class="page" id="page-chat">
+  <div id="unconfigured"></div>
+  <div id="thread"></div>
+  <div id="empty">
+    <h1>IT operations, asked in plain English</h1>
+    <p class="lede">
+      Six systems behind one question: Zabbix for the network estate, Prometheus
+      for the Linux cluster, Ceph for the storage under it, Zammad for tickets,
+      and OpenSearch for the OpenStack logs. Ask, and the right one gets queried.
+    </p>
+  </div>
+</main>
+
+<div class="composer" id="composer">
+  <div class="composer-inner">
+    <div class="chips" id="chips"></div>
+    <form class="ask" id="ask">
+      <textarea id="q" rows="1" placeholder="Ask about tickets, infrastructure, VMs or logs…"
+                autocomplete="off" spellcheck="false"></textarea>
+      <button class="btn icon" id="send" type="submit" aria-label="Send">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <path d="M8 13V3M8 3L3.5 7.5M8 3l4.5 4.5" stroke="currentColor"
+                stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </button>
+    </form>
+  </div>
+</div>
+
+<!-- ----------------------------------------------------------- connections -->
+<main class="page" id="page-connections" hidden>
+  <h1>Connections</h1>
+  <p class="lede">
+    Credentials are held on the server and applied without a restart. Leave a
+    field blank to keep the value already stored.
+  </p>
+
+  <div id="config-status"></div>
+  <form id="config-form">
+    <div class="groups" id="groups"></div>
+    <div class="actions">
+      <button class="btn ghost" type="button" id="test">Test connections</button>
+      <button class="btn" type="submit" id="save">Save and apply</button>
+      <span class="tag" id="config-busy" hidden>Working</span>
+    </div>
+  </form>
+  <div class="results" id="results"></div>
+  <p class="footnote" id="config-path"></p>
+</main>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

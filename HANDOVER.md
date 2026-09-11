@@ -36,7 +36,7 @@ produced came from one system's number being attached to another system's questi
 ## 2. Architecture
 
 ```
-Streamlit frontend  ->  FastAPI backend  ->  LangGraph  ->  9 tools  ->  6 sources
+Browser page  ->  FastAPI (serves both)  ->  LangGraph  ->  9 tools  ->  6 sources
 ```
 
 **LangGraph flow:** `classify` → (`clarify` | `simple_path` | `complex_path`) → `respond`
@@ -132,13 +132,16 @@ as a value.
 | `zabbix_tool.py` | 109 | Thin dispatcher over `tools/zabbix/`. |
 | `tools/zabbix/*` | 1,130 | One tool split by kind of question: client, common, metrics, hosts, items, monitoring, sla, audit. |
 
-### `frontend/`
+### `backend/static/` — the UI
 
-| File | Lines | Role |
-|---|---:|---|
-| `app.py` | 315 | Streamlit UI. Talks to `/chat/stream` only. Sidebar drives `/config`. |
-| `ceph_treemap.py` | 125 | CRUSH hierarchy as a treemap. Triggered by column sniffing, not tool name. |
-| `live_graph.py` | 85 | Draws the graph as it executes. |
+Plain HTML, CSS and JS with no build step, served by FastAPI itself at `/`. There is
+no second process and no CORS: the page and the API share an origin.
+
+| File | Role |
+|---|---|
+| `index.html` | Two pages, Chat and Connections, switched by the top nav on a hash route. |
+| `app.css` | The whole design system. Warm monochrome, system font stacks (no CDN — this runs on a private LAN). |
+| `app.js` | SSE reader, answer rendering, sortable tables, the CRUSH treemap, pricing, and the credentials form. |
 
 ### `tests/`
 
@@ -497,7 +500,7 @@ variable, and `score_routing.py` can measure whether a stronger model fixes them
 
 **Credentials.** `.env` and `credentials.json` are both read; saved config wins.
 Neither is in git, so **a fresh clone has no credentials**. All systems plus Groq can
-be entered through the Streamlit sidebar, which can **Test** each connection before
+be entered on the **Connections** page, which can **Test** each connection before
 saving.
 
 **Ceph specifics.** `CEPH_URL` must be the API base (`https://192.168.1.30:8443`), not
