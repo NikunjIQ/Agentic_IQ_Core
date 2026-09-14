@@ -1,7 +1,7 @@
-import os
 import requests
 from requests.auth import HTTPBasicAuth
 
+from agent import config_store
 from tools.clients import Cached
 
 CACHE_TTL_SECONDS = 300  # Cache metadata for 5 minutes
@@ -33,8 +33,8 @@ def fetch_live_metadata() -> str:
     
     # 1. Fetch Zabbix Hostgroups
     try:
-        zabbix_url = os.getenv("ZABBIX_URL", "http://192.168.1.205:8080").rstrip('/') + '/api_jsonrpc.php'
-        zabbix_token = os.getenv("ZABBIX_API_TOKEN", "")
+        zabbix_url = config_store.get("ZABBIX_URL", "http://192.168.1.205:8080").rstrip('/') + '/api_jsonrpc.php'
+        zabbix_token = config_store.get("ZABBIX_API_TOKEN", "")
         if zabbix_token:
             headers = {'Content-Type': 'application/json-rpc', 'Authorization': f'Bearer {zabbix_token}'}
             payload = {
@@ -54,10 +54,10 @@ def fetch_live_metadata() -> str:
 
     # 2. Fetch Zammad Ticket States
     try:
-        zammad_url = os.getenv("ZAMMAD_URL", "http://192.168.1.205:8082").rstrip('/')
-        zammad_token = os.getenv("ZAMMAD_API_TOKEN", "")
-        zammad_user = os.getenv("ZAMMAD_USER", "")
-        zammad_pass = os.getenv("ZAMMAD_PASS", "")
+        zammad_url = config_store.get("ZAMMAD_URL", "http://192.168.1.205:8082").rstrip('/')
+        zammad_token = config_store.get("ZAMMAD_API_TOKEN", "")
+        zammad_user = config_store.get("ZAMMAD_USER", "")
+        zammad_pass = config_store.get("ZAMMAD_PASS", "")
         
         headers = {}
         auth = None

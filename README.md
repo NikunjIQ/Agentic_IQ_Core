@@ -39,8 +39,11 @@ nothing about network devices — a zero result there means "not collected here"
 
 ```
 Browser (backend/static/) — one page, no build step
-     |  POST /chat/stream
+     |  POST /chat/stream  (session cookie)
 FastAPI (backend/main.py) — serves the API and the page
+     |          \
+     |           SQLite (backend/iqcore.db): users, sessions, credits, usage,
+     |           per-user credentials (encrypted), saved turns, pinned questions
      |
 LangGraph:  classify -> [ clarify | simple_path | complex_path ] -> respond
                               |            |            |
@@ -79,7 +82,7 @@ escalate to the larger one rather than failing the request.
 | Tool | What it answers |
 |---|---|
 | `query_zabbix` | hosts, host groups, items, problems, alerts, triggers, config audit, SLAs. Metrics cover CPU, memory, traffic, disk, uptime, OS/IOS version, agent version, hardware model/serial, ICMP latency and loss |
-| `query_prometheus` | CPU/memory/disk/load/uptime/network, scrape targets, VMs, OpenStack routers & networks, Cinder volumes, containers, raw PromQL, metric search |
+| `query_prometheus` | CPU/memory/disk/load/uptime/network — now, or as a trend over time (`history_minutes`, up to 24h) — scrape targets, VMs, OpenStack routers & networks, Cinder volumes, containers, raw PromQL, metric search |
 | `query_opensearch` | OpenStack logs by date, text, level, service, host, tenant; breakdowns |
 | `query_ceph` | health, capacity (raw **and** usable after replication), pools, OSDs, hosts, RBD images, snapshots, CephFS/MDS, CRUSH rules and hierarchy, cluster logs, monitoring endpoints |
 | `query_zammad` | ticket counts, states, priorities, agents, organisations, SLA, tags, free-text search, named queues, booked time, one ticket's conversation, `group_by` |
@@ -138,16 +141,33 @@ python3 -m venv venv && source venv/bin/activate
 pip install -r backend/requirements.txt
 ```
 
-### Configure — two options
+### Configure
 
-**Through the UI (recommended).** Start the app and open **Connections**. Enter each
-system's details, press **Test** to verify, then **Save**. Written to
-`backend/credentials.json` (gitignored).
+**Accounts.** Open the app and create an account — the first one ever created is the
+admin. Accounts, credit balances, usage and each user's own service credentials live
+in `backend/iqcore.db` (SQLite, gitignored). Service secrets inside it are encrypted
+with a key from `IQCORE_SECRET_KEY`, or one generated into `backend/secret.key`
+(gitignored). **Back up both files together** — the database's secrets are unreadable
+without the key.
 
-**Through a file.** `cp backend/.env.example backend/.env` and fill it in.
+**Each user's systems.** On **Connections**, each user enters the systems *they*
+use. A section left empty stays disconnected, and a question about that system says
+so rather than borrowing anyone else's credentials. **Test** checks before **Save**.
 
-Saved config takes precedence over `.env`; both are read, so they can be mixed.
-Changing config clears every cache automatically.
+**System settings.** The Groq key belongs to the deployment, not to a user: an admin
+sets it on Connections, or put it in `backend/.env` (`cp backend/.env.example
+backend/.env`). It is saved to `backend/credentials.json`.
+
+An existing `authentication.json` and `credentials.json` are imported once, into an
+empty database: users keep their passwords, and the old shared credentials become the
+first user's.
+
+| Variable | Default | What it does |
+|---|---|---|
+| `IQCORE_DB_PATH` | `backend/iqcore.db` | Where the database lives |
+| `IQCORE_SECRET_KEY` | contents of `secret.key` | Key that encrypts service secrets |
+| `IQCORE_PAISE_PER_TOKEN` | `2` | Selling price per token |
+| `IQCORE_COOKIE_SECURE` | `false` | Set to `true` once TLS is in front |
 
 ### Run
 
@@ -177,6 +197,29 @@ difference between "nothing is wrong" and "not collected here".
 
 **Streaming**: `/chat/stream` sends status events during tool calls and tokens as the
 answer is written.
+
+---
+
+## The page
+
+Plain HTML/CSS/JS in `backend/static/`, no framework, no build step, no CDN (it runs
+on a private LAN).
+
+- **Sign-in gate.** Username + password (+ email on sign-up). A 401 anywhere brings it back.
+- **Chat.** Each answer shows the agent's flow graph, the source system, the answer,
+  sortable tables, token cost and its price in rupees.
+- **Charts, picked from a result's columns** (not from which tool ran), so a new tool
+  returning the right shape gets one for free:
+  - `time` + `value` (+ `series`) → **line chart** with a hover crosshair readout.
+  - a text column + numeric columns → **bar chart** with a "Chart by" select.
+  - CRUSH hierarchy → **treemap**.
+- **Dark mode.** Toggle in the top bar; follows the OS until chosen. Stored in
+  `localStorage` and applied before first paint.
+- **History drawer.** Every answered question is saved per account. Reopen a
+  conversation (tables and charts redraw, follow-ups keep context) or delete it.
+  **Pinned** questions (star beside "Asked") re-run in one click.
+- **Spend meter.** Total spent against a ₹10,000 ceiling. Representational only — never blocks.
+- **Connections** page for each user's own credentials; **Users** page (admins) to allocate credit.
 
 ---
 
@@ -223,8 +266,8 @@ than a smaller total.
 ```bash
 pip install -r tests/requirements.txt
 
-pytest -m "not live and not llm"   # offline wiring and unit checks, ~8s, free
-pytest                             # + live tool checks against the real systems
+pytest -m "not live and not llm"   # offline wiring and unit checks (122), ~13s, free
+pytest                             # + 74 live tool checks against the real systems (slow)
 pytest -m ""                       # + extraction evals (SPENDS TOKENS)
 python tests/score_routing.py      # score which system each question routes to
 ```
@@ -270,8 +313,12 @@ assume the next API does it too.
 **Ceph's endpoints are flaky.** The same call has answered in 45s (timing out), 25s and
 10.5s. HTTP calls retry once on timeout.
 
-**No authentication on the API.** Anyone who can reach port 8000 can query it and
-change its configuration.
+**Makeshift accounts.** Every data endpoint needs a session cookie, but sign-up is
+open to anyone who can load the page, and there is no password reset, lockout or rate
+limiting. Credit is shown, never enforced — a balance can go negative.
+
+**Saved conversations are trimmed.** Each stored table is capped at 500 rows and the
+raw tool output is dropped, so a reopened answer says its reasoning detail wasn't kept.
 
 **No logging.** There is no record of what the agent did after the fact.
 

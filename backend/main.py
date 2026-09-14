@@ -5,7 +5,7 @@ import threading
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -14,7 +14,7 @@ import pandas as pd
 import numpy as np
 
 from agent.graph import COMPILED_GRAPH
-from agent import (answer_cache, auth_store, config_store, config_test,
+from agent import (answer_cache, auth_store, config_store, config_test, db,
                    streaming, suggestions, telemetry)
 
 load_dotenv()
@@ -25,13 +25,23 @@ os.environ["LANGCHAIN_API_KEY"] = ""
 
 app = FastAPI(title="IQCore Agent API")
 
-# Credentials saved through the UI take precedence over .env, so a configured
-# instance keeps its settings across restarts.
+# System settings (the Groq key) saved through the UI take precedence over .env.
 _applied = config_store.apply_to_environment()
+
+# Accounts, credits and per-user credentials. Creates the schema on first start
+# and imports authentication.json / credentials.json once, into an empty DB.
+db.init()
+
+SESSION_COOKIE = "iqcore_session"
+# Off by default because the VM serves plain http on the LAN, where a Secure
+# cookie would never be sent back. Turn on the moment TLS is in front.
+COOKIE_SECURE = os.getenv("IQCORE_COOKIE_SECURE", "false").lower() in ("1", "true", "yes")
+
 
 class ChatRequest(BaseModel):
     question: str
     conversation_history: list[dict] = []
+    conversation_id: str | None = None
 
 def safe_serialize(obj):
     if isinstance(obj, float):
@@ -120,28 +130,84 @@ def _serialise_state(result_state: dict) -> dict:
             "suggestions": payload["suggestions"],
         }
 
+
+# ---------------------------------------------------------------- sessions
+# Every data endpoint depends on current_user. Before this the login screen was
+# a curtain over the page and the API answered anyone who could reach the port;
+# now a request without a live session cookie gets a 401 before it reaches any
+# system or spends any credit.
+
+def current_user(request: Request) -> dict:
+    user = db.user_for_session(request.cookies.get(SESSION_COOKIE))
+    if not user:
+        raise HTTPException(status_code=401, detail="Sign in first.")
+    return user
+
+
+def admin_user(user: dict = Depends(current_user)) -> dict:
+    if user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Admins only.")
+    return user
+
+
+def _start_session(response: Response, user_id: int) -> None:
+    response.set_cookie(SESSION_COOKIE, db.create_session(user_id),
+                        max_age=db.SESSION_HOURS * 3600, path="/",
+                        httponly=True, samesite="lax", secure=COOKIE_SECURE)
+
+
 class AuthRequest(BaseModel):
     username: str = ""
     password: str = ""
+    email: str = ""
+
+
+def _public(result: dict) -> dict:
+    return {k: v for k, v in result.items() if k != "user_id"}
 
 
 @app.get("/auth/status")
-async def auth_status():
+def auth_status():
     """Whether any account exists, so a fresh install can offer sign-up first."""
-    return {"accounts": auth_store.user_count()}
+    return {"accounts": db.count_users()}
 
 
 @app.post("/auth/login")
-def auth_login(request: AuthRequest):
+def auth_login(request: AuthRequest, response: Response):
     """Sync, not async: the password hash is 200k rounds of PBKDF2, which is CPU
     work that would sit on the event loop and stall every other request."""
-    return auth_store.login(request.username, request.password)
+    result = auth_store.login(request.username, request.password)
+    if result["ok"]:
+        _start_session(response, result["user_id"])
+    return _public(result)
 
 
 @app.post("/auth/signup")
-def auth_signup(request: AuthRequest):
-    """Sync for the same reason as /auth/login."""
-    return auth_store.signup(request.username, request.password)
+def auth_signup(request: AuthRequest, response: Response):
+    """Creates the account and signs it in. Sync for the same reason as login."""
+    result = auth_store.signup(request.username, request.password, request.email)
+    if result["ok"]:
+        _start_session(response, result["user_id"])
+    return _public(result)
+
+
+@app.post("/auth/logout")
+def auth_logout(request: Request, response: Response):
+    db.end_session(request.cookies.get(SESSION_COOKIE))
+    response.delete_cookie(SESSION_COOKIE, path="/")
+    return {"ok": True}
+
+
+@app.get("/me")
+def me(user: dict = Depends(current_user)):
+    """Who is signed in, and where their credit stands."""
+    balance = db.balance(user["id"])
+    return {"username": user["username"], "email": user["email"], "role": user["role"],
+            "allocated_paise": balance.get("allocated_paise", 0),
+            "spent_paise": balance.get("spent_paise", 0),
+            "remaining_paise": balance.get("remaining_paise", 0),
+            "answers": balance.get("answers", 0),
+            "paise_per_token": db.PAISE_PER_TOKEN}
 
 
 @app.get("/health")
@@ -150,19 +216,46 @@ async def health():
 
 
 @app.post("/chat/stream")
-async def chat_stream(request: ChatRequest):
+async def chat_stream(request: ChatRequest, user: dict = Depends(current_user)):
     """Same answer as /chat, delivered as it is produced.
 
     The graph is synchronous, so it runs in a worker thread and publishes events
     to a queue that this endpoint drains. That keeps one implementation of the
     orchestration rather than a streaming copy that would drift from it.
     """
-    cached = answer_cache.get(request.question, request.conversation_history)
+    user_id = user["id"]
+    # A label for "spent in each session": the login session this answer was
+    # asked in. The hash of the token, never the token itself.
+    session_id = user["token_hash"][:16]
+    # Continue the conversation the page names, or start one. Only ever this
+    # user's: every read filters on user_id, so a guessed id finds nothing.
+    conversation_id = request.conversation_id or db.new_conversation_id()
+    cached = answer_cache.get(request.question, request.conversation_history, user=user_id)
+
+    def charge(tokens):
+        # Never lose an answer to a bookkeeping failure: a charge that cannot be
+        # written is a missing row, not a stalled stream.
+        try:
+            db.record_usage(user_id, session_id, request.question, tokens)
+        except Exception:
+            pass
+
+    def remember(payload):
+        # Kept so the conversation can be reopened. Same rule as a charge: a
+        # failed write loses the history row, never the answer.
+        try:
+            db.save_turn(user_id, conversation_id, request.question,
+                         payload.get("final_answer", ""), payload)
+        except Exception:
+            pass
 
     def events():
         if cached is not None:
+            charge(0)       # free, but still an answer this user received
+            done_payload = {**cached, "conversation_id": conversation_id}
+            remember(done_payload)
             yield _sse({"type": "token", "text": cached.get("final_answer", "")})
-            yield _sse({"type": "done", "payload": cached})
+            yield _sse({"type": "done", "payload": done_payload})
             return
 
         emitter = streaming.Emitter()
@@ -171,6 +264,7 @@ async def chat_stream(request: ChatRequest):
             streaming.set_emitter(emitter)          # inside the thread it will run in
             telemetry.start()                       # same reason: contextvars are per-thread
             try:
+                config_store.use_user(user_id)      # this user's credentials, and only theirs
                 state = COMPILED_GRAPH.invoke({
                     "question": request.question,
                     "conversation_history": request.conversation_history,
@@ -179,10 +273,19 @@ async def chat_stream(request: ChatRequest):
                     "tools_called": [], "final_answer": None,
                 })
                 payload = _serialise_state(state)
-                answer_cache.put(request.question, payload, request.conversation_history)
-                emitter.finish(payload)
+                answer_cache.put(request.question, payload, request.conversation_history,
+                                 user=user_id)
+                payload = {**payload, "conversation_id": conversation_id}
+                remember(payload)
+                done = lambda: emitter.finish(payload)
             except Exception as exc:
-                emitter.fail(_explain_failure(exc))
+                message = _explain_failure(exc)
+                done = lambda: emitter.fail(message)
+            # Charged BEFORE the page hears the answer is done, so the balance it
+            # fetches next already includes this one. Charged on failure too: the
+            # model calls that ran before it were billed by Groq all the same.
+            charge((telemetry.summary() or {}).get("total_tokens", 0))
+            done()
 
         threading.Thread(target=run, daemon=True).start()
 
@@ -201,54 +304,130 @@ def _sse(event: dict) -> str:
     return f"data: {json.dumps(event, default=str)}\n\n"
 
 
+# ------------------------------------------------------------------ settings
+
 class ConfigRequest(BaseModel):
     values: dict = {}
     systems: list[str] = []
 
 
 @app.get("/config")
-async def get_config():
-    """Current settings, secrets masked, plus the field layout for the UI."""
+def get_config(user: dict = Depends(current_user)):
+    """The caller's own settings, secrets masked, plus the field layout.
+
+    The Groq key is a system setting, so only an admin sees or edits it.
+    """
+    is_admin = user["role"] == "admin"
     return {
-        "configured": config_store.is_configured(),
-        "values": config_store.masked(),
+        "configured": config_store.user_is_configured(user["id"]),
+        "values": config_store.user_masked(user["id"], include_system=is_admin),
         "groups": [
             {"system": system, "description": description,
              "fields": [{"key": key, "label": label, "secret": secret,
                          "placeholder": placeholder}
                         for key, label, secret, placeholder in fields]}
             for system, description, fields in config_store.FIELD_GROUPS
+            if is_admin or system not in config_store.SYSTEM_SERVICES
         ],
-        "path": str(config_store.CONFIG_PATH),
+        "path": f"your account ({user['username']}), secrets encrypted",
     }
 
 
 @app.post("/config/test")
-def test_config(request: ConfigRequest):
+def test_config(request: ConfigRequest, user: dict = Depends(current_user)):
     """Check credentials WITHOUT saving them.
 
     Sync for the same reason as /chat: test_all opens connections to five
     systems and Groq, each with its own timeout, so an unreachable host held
     the whole event loop while it waited.
 
-    Values already stored are merged underneath, so a user testing one changed
-    field does not have to retype every masked secret.
+    The caller's stored values are merged underneath, so testing one changed
+    field does not mean retyping every masked secret.
     """
-    merged = {**config_store.load(), **{k: v for k, v in request.values.items()
-                                        if str(v or "").strip()}}
+    merged = config_store.user_merged(user["id"], request.values)
     return {"results": config_test.test_all(merged, request.systems or None)}
 
 
 @app.post("/config")
-def save_config(request: ConfigRequest):
-    """Persist credentials, apply them, and drop caches from the old ones.
+def save_config(request: ConfigRequest, user: dict = Depends(current_user)):
+    """Save the caller's settings, drop their cached data, and test the result.
 
     Sync: it tests every connection before returning, same as /config/test.
     """
-    result = config_store.save(request.values)
-    merged = config_store.load()
-    result["results"] = config_test.test_all(merged, request.systems or None)
+    result = config_store.user_save(user["id"], request.values,
+                                    allow_system=user["role"] == "admin")
+    result["results"] = config_test.test_all(config_store.user_merged(user["id"]),
+                                             request.systems or None)
     return result
+
+
+# ------------------------------------------------ conversations and pins
+# Every one filtered by the signed-in user. Another user's id and a made-up one
+# both answer 404: there is nothing to tell them apart by, by design.
+
+@app.get("/conversations")
+def conversations(user: dict = Depends(current_user)):
+    return {"conversations": db.list_conversations(user["id"])}
+
+
+@app.get("/conversations/{conversation_id}")
+def conversation(conversation_id: str, user: dict = Depends(current_user)):
+    turns = db.load_conversation(user["id"], conversation_id)
+    if not turns:
+        raise HTTPException(status_code=404, detail="No such conversation.")
+    return {"id": conversation_id, "turns": turns}
+
+
+@app.delete("/conversations/{conversation_id}")
+def delete_conversation(conversation_id: str, user: dict = Depends(current_user)):
+    if not db.delete_conversation(user["id"], conversation_id):
+        raise HTTPException(status_code=404, detail="No such conversation.")
+    return {"ok": True}
+
+
+class FavouriteRequest(BaseModel):
+    question: str
+
+
+@app.get("/favourites")
+def favourites(user: dict = Depends(current_user)):
+    return {"favourites": db.list_favourites(user["id"])}
+
+
+@app.post("/favourites")
+def add_favourite(request: FavouriteRequest, user: dict = Depends(current_user)):
+    if not request.question.strip():
+        raise HTTPException(status_code=400, detail="Nothing to pin.")
+    return db.add_favourite(user["id"], request.question)
+
+
+@app.delete("/favourites/{favourite_id}")
+def delete_favourite(favourite_id: int, user: dict = Depends(current_user)):
+    if not db.delete_favourite(user["id"], favourite_id):
+        raise HTTPException(status_code=404, detail="No such pin.")
+    return {"ok": True}
+
+
+# --------------------------------------------------------------------- admin
+
+class AllocationRequest(BaseModel):
+    user_id: int
+    allocated_rupees: float
+
+
+@app.get("/admin/credits")
+def admin_credits(user: dict = Depends(admin_user)):
+    """Every account's allocation, spend and remaining credit."""
+    return {"users": db.all_balances(), "paise_per_token": db.PAISE_PER_TOKEN}
+
+
+@app.post("/admin/credits")
+def admin_set_allocation(request: AllocationRequest, user: dict = Depends(admin_user)):
+    if request.allocated_rupees < 0:
+        raise HTTPException(status_code=400, detail="An allocation cannot be negative.")
+    if not db.set_allocation(request.user_id, round(request.allocated_rupees * 100)):
+        raise HTTPException(status_code=404, detail="No such account.")
+    return {"ok": True, "balance": db.balance(request.user_id)}
 
 
 
@@ -256,7 +435,8 @@ def save_config(request: ConfigRequest):
 # Mounted LAST so every route above still wins: a mount at "/" is only reached
 # once nothing else matches. Serving the page from the API process is what
 # removes the second one — there is no separate frontend server, and no CORS
-# because it is all one origin.
+# because it is all one origin. That same origin is why the session cookie
+# needs no cross-site configuration.
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 

@@ -1,4 +1,5 @@
 import re
+from datetime import datetime, timezone
 from typing import Optional
 
 import pandas as pd
@@ -222,6 +223,33 @@ def _rows(series: list, unit: str, node_map: dict) -> list:
     return sorted(out, key=lambda r: r["value"], reverse=True)
 
 
+def _series_rows(matrix: list, unit: str, node_map: dict) -> list:
+    """Range-query results as long-format rows: one per series per point in time.
+
+    Long, not wide, so one chart can draw any number of series without knowing
+    their names in advance — the page groups by `series` and plots `value`
+    against `time`.
+    """
+    reverse = {addr.split(":")[0]: name for name, addr in node_map.items()}
+    out = []
+    for item in matrix:
+        labels = dict(item.get("metric", {}))
+        instance = labels.get("instance", "")
+        host = (reverse.get(instance.split(":")[0], instance)
+                or labels.get("job", "") or "(aggregate)")
+        detail = labels.get("mountpoint") or labels.get("device") or ""
+        series = f"{host} [{detail}]" if detail else host
+        for stamp, raw in item.get("values", []):
+            try:
+                value = round(float(raw), 2)
+            except (TypeError, ValueError):
+                continue
+            out.append({"time": datetime.fromtimestamp(float(stamp), timezone.utc)
+                                .strftime("%Y-%m-%dT%H:%M:%SZ"),
+                        "series": series, "host": host, "value": value, "unit": unit})
+    return out
+
+
 @tool
 def query_prometheus(
     metric: Optional[str] = None,
@@ -230,6 +258,7 @@ def query_prometheus(
     job_filter: Optional[str] = None,
     search: Optional[str] = None,
     range_window: Optional[str] = None,
+    history_minutes: Optional[int] = None,
 ) -> dict:
     """
     Query Prometheus: the Linux cluster server01/02/03, OpenStack, VMs, containers.
@@ -260,6 +289,10 @@ def query_prometheus(
     memcached, proxysql, libvirt_exporter, fluentd, blackbox_exporter,
     openstack_exporter, alertmanager, prometheus); range_window (rate window,
     default '5m').
+
+    History: history_minutes (e.g. 60) with a host metric returns a time series,
+    about one point per minute, for questions about a trend or a period ("over the
+    last hour", "since this morning"). Leave it out for current values.
     """
     client = PrometheusClient()
     window = (range_window or "5m").strip()
@@ -567,6 +600,28 @@ def query_prometheus(
                                 f"promql=<expression>, or search=<keyword> to discover "
                                 f"metric names."),
                     "dataframe": pd.DataFrame(), "raw": {}}
+
+        # ---- history: the same expression, as a range ----
+        if history_minutes:
+            minutes = max(5, min(int(history_minutes), 24 * 60))
+            # About 60 points whatever the span: a day at one-minute resolution is
+            # 1,440 points per series, which neither a chart nor the model needs.
+            step = f"{max(60, minutes)}s"
+            rows = _series_rows(client.over_time(expression, minutes=minutes, step=step),
+                                unit, node_map)
+            df = pd.DataFrame(rows)
+            if not rows:
+                return {"summary": (f"{label}: no history for the last {minutes} minutes. "
+                                    f"Expression used: {expression}."),
+                        "dataframe": df, "raw": {"promql": expression}}
+            parts = [f"{name}: latest {group['value'].iloc[-1]}{unit}, "
+                     f"min {group['value'].min()}{unit}, max {group['value'].max()}{unit}"
+                     for name, group in df.groupby("series", sort=False)]
+            summary = (f"{label} over the last {minutes} minutes "
+                       f"({df['series'].nunique()} series, {len(rows)} points). "
+                       f"PromQL: {expression}. " + "; ".join(parts[:15]))
+            return {"summary": summary, "dataframe": df,
+                    "raw": {"promql": expression, "minutes": minutes}}
 
         series = client.instant(expression)
         rows = _rows(series, unit, node_map)

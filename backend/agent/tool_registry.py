@@ -47,7 +47,8 @@ ROUTING_SUMMARIES = {
     "query_prometheus": (
         "Prometheus. The Linux cluster server01/02/03, OpenStack, VMs and "
         "containers — a different estate from Zabbix. CPU, memory, disk, load, "
-        "uptime, network, scrape targets, OpenStack routers/networks, and Cinder "
+        "uptime, network (now, or as a trend over time), scrape targets, OpenStack "
+        "routers/networks, and Cinder "
         "volume/snapshot COUNTS from the OpenStack exporter — the RBD snapshots "
         "themselves are Ceph. Raw PromQL."
     ),

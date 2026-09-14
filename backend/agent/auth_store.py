@@ -1,40 +1,29 @@
-"""A makeshift login gate, backed by authentication.json.
+"""Accounts: sign-up and password checks, on the SQLite store (agent.db).
 
-Deliberately NOT real authentication, and it should be replaced before this is
-exposed to anything untrusted. What it is: a username/password list that the UI
-checks before showing the app.
+main.py issues a session cookie on top of this module; a successful login() is
+what earns one, and every data endpoint checks it. What this still is not:
+there is no password reset, lockout, rate limiting or email verification, and
+sign-up is open to anyone who can load the page. Replace before exposing this to
+anything untrusted.
 
-What it is NOT, and what has to change when the real thing goes in:
-
-  - There is no session. A successful login sets a flag in the browser; the API
-    itself is still open, so anything that can reach the port can call /chat
-    without logging in at all.
-  - There is no rate limiting, lockout, password policy, or reset.
-  - Signup is open. Anyone who can load the page can create an account.
-
-Passwords are still hashed rather than stored as text. That is not because this
-is secure — it is not — but because the file would otherwise be a list of
-plaintext passwords that people reuse elsewhere, and hashing costs three lines
-of standard library.
+Passwords are salted PBKDF2 hashes, never text. The format is unchanged from the
+JSON-file era, so accounts imported from authentication.json keep working with
+the passwords their owners already use.
 """
 
 import hashlib
 import hmac
-import json
-import os
+import re
 import secrets
-import threading
-from datetime import datetime, timezone
-from pathlib import Path
+import sqlite3
 
-AUTH_PATH = Path(os.getenv("IQCORE_AUTH_PATH",
-                           Path(__file__).resolve().parent.parent / "authentication.json"))
-
-_lock = threading.Lock()
+from agent import db
 
 # PBKDF2 is in the standard library and needs no dependency. The cost is chosen
 # to be unnoticeable on a login (~50ms) while still being real work to grind.
 _ITERATIONS = 200_000
+
+_EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 def _hash(password: str, salt: str) -> str:
@@ -42,71 +31,45 @@ def _hash(password: str, salt: str) -> str:
         "sha256", password.encode("utf-8"), bytes.fromhex(salt), _ITERATIONS).hex()
 
 
-def load() -> dict:
-    """Whatever is on disk. An empty user list if the file has never been written."""
-    try:
-        with _lock:
-            if AUTH_PATH.exists():
-                data = json.loads(AUTH_PATH.read_text(encoding="utf-8"))
-                if isinstance(data, dict) and isinstance(data.get("users"), list):
-                    return data
-    except Exception:
-        pass
-    return {"users": []}
-
-
-def _write(data: dict) -> None:
-    with _lock:
-        AUTH_PATH.parent.mkdir(parents=True, exist_ok=True)
-        AUTH_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
-        try:
-            os.chmod(AUTH_PATH, 0o600)   # best effort; a no-op on some Windows setups
-        except Exception:
-            pass
-
-
-def _find(users: list, username: str):
-    # Usernames match case-insensitively. "Nikunj" failing to log in an account
-    # created as "nikunj" is a support call, not a security feature.
-    key = username.strip().lower()
-    return next((u for u in users if u.get("username", "").lower() == key), None)
-
-
 def user_count() -> int:
-    return len(load()["users"])
+    return db.count_users()
 
 
-def signup(username: str, password: str) -> dict:
-    """Create an account. Returns {"ok": bool, "error": str}."""
+def signup(username: str, password: str, email: str) -> dict:
+    """Create an account. The first one ever created is the admin."""
     username = (username or "").strip()
+    email = (email or "").strip()
     if len(username) < 3:
         return {"ok": False, "error": "Username must be at least 3 characters."}
     if len(password or "") < 6:
         return {"ok": False, "error": "Password must be at least 6 characters."}
-
-    data = load()
-    if _find(data["users"], username):
+    if not _EMAIL.match(email):
+        return {"ok": False, "error": "That email address doesn't look right."}
+    if db.find_user(username):
         return {"ok": False, "error": "That username is already taken."}
+    if db.email_taken(email):
+        return {"ok": False, "error": "That email address is already registered."}
 
     salt = secrets.token_hex(16)
-    data["users"].append({
-        "username": username,
-        "salt": salt,
-        "hash": _hash(password, salt),
-        "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-    })
-    _write(data)
-    return {"ok": True, "username": username}
+    try:
+        user_id = db.create_user(username, email, salt, _hash(password, salt))
+    except sqlite3.IntegrityError:
+        # Two sign-ups racing for the same name: the UNIQUE constraint is the
+        # real guard, the checks above are only there for a readable message.
+        return {"ok": False, "error": "That username or email is already taken."}
+    return {"ok": True, "user_id": user_id, "username": username}
 
 
 def login(username: str, password: str) -> dict:
-    """Check a username and password. Returns {"ok": bool, "error": str}."""
-    user = _find(load()["users"], (username or "").strip())
-    if user:
-        # compare_digest, not ==, so the comparison does not leak how much of the
-        # hash matched through how long it took.
-        if hmac.compare_digest(user["hash"], _hash(password or "", user["salt"])):
-            return {"ok": True, "username": user["username"]}
+    """Check a username and password."""
+    user = db.find_user((username or "").strip())
+    # Hash even when the user does not exist, so how long the answer takes does
+    # not reveal which usernames are real.
+    candidate = _hash(password or "", user["password_salt"] if user else "00" * 16)
+    # compare_digest, not ==, so the comparison does not leak how much matched.
+    if user and hmac.compare_digest(user["password_hash"], candidate):
+        return {"ok": True, "user_id": user["id"], "username": user["username"],
+                "role": user["role"]}
     # One message for both cases: saying which half was wrong tells an attacker
     # which usernames exist.
     return {"ok": False, "error": "Username or password is incorrect."}

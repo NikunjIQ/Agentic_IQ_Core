@@ -4,6 +4,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>IQCore</title>
+<script>
+  // Before first paint, so a dark-mode user never sees a white flash. Wrapped
+  // because storage can throw (private windows, blocked site data).
+  try { var t = localStorage.getItem("iqcore_theme"); if (t) document.documentElement.dataset.theme = t; } catch (e) {}
+</script>
 <link rel="stylesheet" href="/static/app.css">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%23111'/><circle cx='16' cy='16' r='6' fill='none' stroke='%23fff' stroke-width='2.5'/></svg>">
 </head>
@@ -22,6 +27,10 @@
         <input type="text" id="gate-user" autocomplete="username" autocapitalize="none"
                spellcheck="false" required>
       </label>
+      <label id="gate-email-wrap" hidden>
+        <span class="lab">Email</span>
+        <input type="email" id="gate-email" autocomplete="email" spellcheck="false">
+      </label>
       <label>
         <span class="lab">Password</span>
         <input type="password" id="gate-pass" autocomplete="current-password" required>
@@ -35,20 +44,50 @@
       <button type="button" class="linkish" id="gate-switch">Create one</button>
     </p>
     <p class="footnote">
-      A placeholder gate, not real authentication — it hides the interface, it
-      does not protect the API.
+      Makeshift sign-in: a session lasts 12 hours, and there is no password
+      reset or email check yet. Ask your admin if you are locked out.
     </p>
   </div>
 </div>
 
 <header class="topbar" id="chrome">
   <span class="brand">IQCore</span>
+  <button class="tab" id="drawer-open" type="button" aria-controls="drawer">History</button>
   <nav class="tabs">
     <button class="tab" data-page="chat" aria-current="page">Chat</button>
     <button class="tab" data-page="connections">Connections</button>
+    <button class="tab" data-page="users" data-admin hidden>Users</button>
   </nav>
-  <div class="spend" id="spend"></div>
+  <div class="account">
+    <div class="spend" id="spend"></div>
+    <span class="user-chip" id="who"></span>
+    <button class="theme-toggle" id="theme" type="button" aria-label="Switch between light and dark">
+      <svg class="moon" width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M13.5 9.6A5.5 5.5 0 0 1 6.4 2.5a5.5 5.5 0 1 0 7.1 7.1Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>
+      <svg class="sun" width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="8" cy="8" r="3" stroke="currentColor" stroke-width="1.6"/><path d="M8 1.5v1.6M8 12.9v1.6M1.5 8h1.6M12.9 8h1.6M3.4 3.4l1.1 1.1M11.5 11.5l1.1 1.1M3.4 12.6l1.1-1.1M11.5 4.5l1.1-1.1" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+    </button>
+    <button class="btn ghost small" id="signout" type="button">Sign out</button>
+  </div>
 </header>
+
+<!-- ---------------------------------------------------------------- drawer -->
+<aside class="drawer" id="drawer" hidden aria-label="Your conversations">
+  <div class="drawer-head">
+    <span class="card-title">Your conversations</span>
+    <button class="btn ghost small" id="drawer-close" type="button">Close</button>
+  </div>
+  <button class="btn small new-chat" id="new-chat" type="button">New conversation</button>
+  <section class="drawer-section">
+    <span class="card-title">Pinned</span>
+    <ul class="drawer-list" id="pins"></ul>
+    <p class="drawer-empty" id="pins-empty">Star a question to pin it here.</p>
+  </section>
+  <section class="drawer-section">
+    <span class="card-title">Recent</span>
+    <ul class="drawer-list" id="convos"></ul>
+    <p class="drawer-empty" id="convos-empty">Your conversations appear here once you ask something.</p>
+  </section>
+</aside>
+<div class="scrim" id="scrim" hidden></div>
 
 <!-- ------------------------------------------------------------------ chat -->
 <main class="page" id="page-chat">
@@ -84,8 +123,9 @@
 <main class="page" id="page-connections" hidden>
   <h1>Connections</h1>
   <p class="lede">
-    Credentials are held on the server and applied without a restart. Leave a
-    field blank to keep the value already stored.
+    Your own credentials for each system, held on the server and encrypted. A
+    section you leave empty stays disconnected, and questions about that system
+    will tell you so. Leave a field blank to keep the value already stored.
   </p>
 
   <div id="config-status"></div>
@@ -99,6 +139,28 @@
   </form>
   <div class="results" id="results"></div>
   <p class="footnote" id="config-path"></p>
+</main>
+
+<!-- ----------------------------------------------------------------- users -->
+<main class="page" id="page-users" hidden>
+  <h1>Users</h1>
+  <p class="lede">
+    Every account's AI credit: what it has been allocated, what its answers have
+    cost so far, and what is left. Nothing is blocked at zero yet — this is the
+    figure a plan would be sold against.
+  </p>
+  <div id="users-status"></div>
+  <div class="card">
+    <div class="tablewrap">
+      <table class="users-table">
+        <thead><tr>
+          <th>Username</th><th>Email</th><th>Role</th><th>Allocated (₹)</th>
+          <th>Spent</th><th>Remaining</th><th>Answers</th><th></th>
+        </tr></thead>
+        <tbody id="users-body"></tbody>
+      </table>
+    </div>
+  </div>
 </main>
 
 <script src="/static/app.js"></script>

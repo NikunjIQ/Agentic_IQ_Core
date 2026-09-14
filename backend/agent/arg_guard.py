@@ -37,7 +37,7 @@ _TIME_PATTERN = re.compile(
 )
 
 # Arguments that only make sense if the user referred to a time period.
-_TIME_ARGUMENTS = ("date_filter", "date_field", "range_window")
+_TIME_ARGUMENTS = ("date_filter", "date_field", "range_window", "history_minutes")
 
 
 def mentions_a_time_period(*texts) -> bool:

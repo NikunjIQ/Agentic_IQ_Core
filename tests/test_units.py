@@ -1501,38 +1501,269 @@ def test_ceph_daemon_client_forces_a_real_total():
     assert "track_total_hits" in inspect.getsource(CephDaemonLogClient.search)
 
 
-# --- the makeshift login gate -----------------------------------------------
-def test_auth_store_round_trip(tmp_path=None):
-    """Signup, login, and the three ways login must fail.
+# --- accounts, credits and per-user settings (SQLite) ----------------------
+import contextlib as _contextlib
 
-    A gate this simple is exactly the kind of thing that quietly stops checking
-    the password, so the negative cases matter more than the positive one.
-    """
-    import importlib
-    import json
-    import os
-    import tempfile
 
-    os.environ["IQCORE_AUTH_PATH"] = os.path.join(tempfile.mkdtemp(), "authentication.json")
+@_contextlib.contextmanager
+def _fresh_db(auth_file=None):
+    """A brand-new database in a temp dir; the real one is never touched."""
+    import os, tempfile
+    from agent import config_store, db
+    folder = tempfile.mkdtemp()
+    names = ("IQCORE_DB_PATH", "IQCORE_SECRET_KEY_PATH", "IQCORE_AUTH_PATH")
+    saved = {k: os.environ.get(k) for k in names}
+    os.environ["IQCORE_DB_PATH"] = os.path.join(folder, "iqcore.db")
+    os.environ["IQCORE_SECRET_KEY_PATH"] = os.path.join(folder, "secret.key")
+    os.environ["IQCORE_AUTH_PATH"] = auth_file or os.path.join(folder, "none.json")
+    try:
+        db.init()
+        yield db, folder
+    finally:
+        config_store.use_user(None)      # never leak a signed-in user into later tests
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+def test_db_schema_is_idempotent_and_enforces_foreign_keys():
+    import sqlite3
+    with _fresh_db() as (db, _):
+        db._ready.clear()
+        db.init()                                    # a second start: no error
+        try:
+            db.record_usage(999, "s", "q", 10)       # there is no user 999
+            raise AssertionError("foreign keys are not enforced")
+        except sqlite3.IntegrityError:
+            pass
+
+
+def test_signup_login_and_sessions():
     from agent import auth_store
-    importlib.reload(auth_store)          # pick up the redirected path
+    with _fresh_db() as (db, _):
+        assert not auth_store.signup("nikunj", "secret123", "not-an-email")["ok"]
+        first = auth_store.signup("nikunj", "secret123", "n@example.com")
+        second = auth_store.signup("priya", "secret456", "p@example.com")
+        assert first["ok"] and second["ok"]
+        assert not auth_store.signup("NIKUNJ", "whatever1", "x@example.com")["ok"], "username case"
+        assert not auth_store.signup("other", "whatever1", "N@EXAMPLE.com")["ok"], "email case"
 
-    assert auth_store.user_count() == 0
-    assert not auth_store.login("nikunj", "secret123")["ok"], "no accounts yet"
+        assert auth_store.login("nikunj", "secret123")["role"] == "admin", "first account is admin"
+        assert auth_store.login("priya", "secret456")["role"] == "user"
+        assert not auth_store.login("priya", "secret123")["ok"], "one user's password on another"
+        assert not auth_store.login("ghost", "secret123")["ok"]
 
-    assert auth_store.signup("nikunj", "secret123")["ok"]
-    assert auth_store.login("nikunj", "secret123")["ok"]
-    assert auth_store.login("NIKUNJ", "secret123")["ok"], "usernames match case-insensitively"
+        token = db.create_session(first["user_id"])
+        assert db.user_for_session(token)["username"] == "nikunj"
+        assert db.user_for_session("forged") is None
+        db.end_session(token)
+        assert db.user_for_session(token) is None, "sign-out must end the session"
 
-    assert not auth_store.login("nikunj", "wrong")["ok"]
-    assert not auth_store.login("someone", "secret123")["ok"]
-    assert not auth_store.signup("nikunj", "another1")["ok"], "duplicate username"
-    assert not auth_store.signup("ab", "secret123")["ok"], "username too short"
-    assert not auth_store.signup("valid", "123")["ok"], "password too short"
+        with db.tx() as c:                           # an expired session is no session
+            c.execute("INSERT INTO sessions VALUES (?, ?, ?)",
+                      (db._digest("old"), first["user_id"], "2000-01-01T00:00:00+00:00"))
+        assert db.user_for_session("old") is None
 
-    assert auth_store.signup("second", "secret123")["ok"]
-    assert auth_store.user_count() == 2
 
-    stored = json.loads(open(os.environ["IQCORE_AUTH_PATH"], encoding="utf-8").read())
-    assert "secret123" not in json.dumps(stored), "passwords must never be stored in clear"
-    assert {"username", "salt", "hash", "created"} == set(stored["users"][0])
+def test_credit_balance_is_computed_not_stored():
+    from agent import auth_store
+    with _fresh_db() as (db, _):
+        uid = auth_store.signup("nikunj", "secret123", "n@example.com")["user_id"]
+        assert db.balance(uid)["allocated_paise"] == 1_000_000, "new accounts get Rs 10,000"
+        for session, tokens in (("s1", 5000), ("s1", 1000), ("s2", 0)):
+            db.record_usage(uid, session, "q", tokens)
+        b = db.balance(uid)
+        assert b["answers"] == 3, "a cached answer still counts as an answer"
+        assert b["spent_paise"] == 6000 * db.PAISE_PER_TOKEN
+        assert b["remaining_paise"] == 1_000_000 - b["spent_paise"]
+        assert db.set_allocation(uid, 500)
+        assert db.balance(uid)["remaining_paise"] < 0, "show-only: a balance may go negative"
+        with db.tx() as c:
+            per = dict(c.execute("SELECT session_id, SUM(paise) FROM usage "
+                                 "WHERE user_id = ? GROUP BY session_id", (uid,)).fetchall())
+        assert per == {"s1": 6000 * db.PAISE_PER_TOKEN, "s2": 0}
+
+
+def test_settings_are_per_user_and_secrets_are_sealed():
+    """The leak this whole change exists to prevent."""
+    from agent import answer_cache, auth_store, config_store
+    from tools.clients import Cached
+    with _fresh_db() as (db, _):
+        a = auth_store.signup("alice", "secret123", "a@example.com")["user_id"]
+        b = auth_store.signup("bob", "secret456", "b@example.com")["user_id"]
+        config_store.user_save(a, {"ZABBIX_URL": "http://zbx-a",
+                                   "ZABBIX_API_TOKEN": "token-alice-1234", "CEPH_URL": ""})
+        config_store.user_save(b, {"ZAMMAD_URL": "http://zammad-b"})
+
+        with db.tx() as c:
+            raw = " ".join(r[0] for r in c.execute("SELECT settings FROM service_credentials"))
+        assert "token-alice-1234" not in raw and "enc:" in raw, "secrets must be encrypted at rest"
+        assert set(db.load_settings(a)) == {"Zabbix"}, "an empty section is not a connection"
+
+        probe = Cached("isolation probe", 60)
+        try:
+            config_store.use_user(a)
+            assert config_store.get("ZABBIX_API_TOKEN") == "token-alice-1234"
+            config_store.require("Zabbix")
+            probe.put("alice's devices")
+            answer_cache.put("how many hosts", {"final_answer": "alice",
+                                                "complexity": "simple"}, [])
+
+            config_store.use_user(b)
+            assert config_store.get("ZABBIX_API_TOKEN") == "", "bob must not see alice's token"
+            try:
+                config_store.require("Zabbix")
+                raise AssertionError("bob has no Zabbix and must be told so")
+            except config_store.NotConnected:
+                pass
+            assert probe.get() is None, "bob must not be served alice's cached data"
+            assert answer_cache.get("how many hosts", []) is None, "nor alice's answer"
+
+            config_store.use_user(a)
+            assert probe.get() == "alice's devices"
+        finally:
+            Cached._registry.remove(probe)
+
+
+def test_legacy_json_files_are_imported_once():
+    """Existing users keep their passwords; the old global credentials become the admin's."""
+    import json, os, tempfile
+    from agent import auth_store
+    salt = "ab" * 16
+    auth_file = os.path.join(tempfile.mkdtemp(), "authentication.json")
+    with open(auth_file, "w", encoding="utf-8") as f:
+        json.dump({"users": [
+            {"username": "nikunj", "salt": salt, "hash": auth_store._hash("old-pass1", salt)},
+            {"username": "priya", "salt": salt, "hash": auth_store._hash("old-pass2", salt)},
+        ]}, f)
+
+    with _isolated_store("iqcore_test_legacy.json") as (store, _):
+        store.save({"ZABBIX_URL": "http://zbx.legacy", "ZABBIX_API_TOKEN": "legacy-token",
+                    "GROQ_API_KEY": "gsk-system"})
+        with _fresh_db(auth_file) as (db, _):
+            assert auth_store.login("nikunj", "old-pass1")["role"] == "admin"
+            assert auth_store.login("priya", "old-pass2")["role"] == "user"
+            settings = db.load_settings(db.find_user("nikunj")["id"])
+            assert settings["Zabbix"]["ZABBIX_API_TOKEN"] == "legacy-token"
+            assert "Groq" not in settings, "Groq stays a system setting"
+            assert db.load_settings(db.find_user("priya")["id"]) == {}
+            db._ready.clear()
+            db.init()
+            assert db.count_users() == 2, "the import runs once, into an empty database"
+
+
+def test_endpoints_require_a_session_and_admin_is_enforced():
+    from fastapi.testclient import TestClient
+    import main
+    with _fresh_db() as (db, _):
+        admin, user = TestClient(main.app), TestClient(main.app)
+        assert admin.get("/me").status_code == 401
+        assert admin.post("/chat/stream", json={"question": "hi"}).status_code == 401
+        assert admin.get("/config").status_code == 401
+
+        assert admin.post("/auth/signup", json={"username": "nikunj", "password": "secret123",
+                                                "email": "n@example.com"}).json()["ok"]
+        assert user.post("/auth/signup", json={"username": "priya", "password": "secret456",
+                                               "email": "p@example.com"}).json()["ok"]
+        assert admin.get("/me").json()["role"] == "admin"
+        assert user.get("/me").json()["role"] == "user"
+
+        assert user.get("/admin/credits").status_code == 403
+        rows = admin.get("/admin/credits").json()["users"]
+        priya = next(r for r in rows if r["username"] == "priya")
+        assert admin.post("/admin/credits", json={"user_id": priya["user_id"],
+                                                  "allocated_rupees": 2500}).json()["ok"]
+        assert user.get("/me").json()["allocated_paise"] == 250_000
+
+        assert "Groq" not in {g["system"] for g in user.get("/config").json()["groups"]}
+        assert "Groq" in {g["system"] for g in admin.get("/config").json()["groups"]}
+
+        user.post("/auth/logout")
+        assert user.get("/me").status_code == 401
+
+
+# --- saved conversations, pins, history charts ------------------------------
+def test_turns_are_saved_trimmed_and_scoped_per_user():
+    from agent import auth_store
+    with _fresh_db() as (db, _):
+        a = auth_store.signup("alice", "secret123", "a@example.com")["user_id"]
+        b = auth_store.signup("bob", "secret456", "b@example.com")["user_id"]
+        cid = db.new_conversation_id()
+        big = {"final_answer": "x", "dataframes": [[{"n": i} for i in range(900)]],
+               "tool_results_raw": [{"huge": "y" * 1000}]}
+        db.save_turn(a, cid, "first question", "first answer", big)
+        db.save_turn(a, cid, "second question", "second answer", {"final_answer": "y"})
+
+        listed = db.list_conversations(a)
+        assert listed[0]["id"] == cid and listed[0]["title"] == "first question"
+        assert listed[0]["turns"] == 2
+        turns = db.load_conversation(a, cid)
+        assert [t["question"] for t in turns] == ["first question", "second question"]
+        assert len(turns[0]["payload"]["dataframes"][0]) == db.STORED_ROWS, "tables are capped"
+        assert "tool_results_raw" not in turns[0]["payload"], "raw tool output is not kept"
+
+        assert db.list_conversations(b) == [], "bob sees none of alice's conversations"
+        assert db.load_conversation(b, cid) == [], "nor can he open one by its id"
+        assert not db.delete_conversation(b, cid), "nor delete it"
+        assert db.delete_conversation(a, cid) and db.load_conversation(a, cid) == []
+
+
+def test_favourites_are_idempotent_and_per_user():
+    from agent import auth_store
+    with _fresh_db() as (db, _):
+        a = auth_store.signup("alice", "secret123", "a@example.com")["user_id"]
+        b = auth_store.signup("bob", "secret456", "b@example.com")["user_id"]
+        first = db.add_favourite(a, "is ceph healthy")
+        again = db.add_favourite(a, "is ceph healthy")
+        assert first["id"] == again["id"] and len(db.list_favourites(a)) == 1
+        assert db.list_favourites(b) == []
+        assert not db.delete_favourite(b, first["id"]), "bob cannot remove alice's pin"
+        assert db.delete_favourite(a, first["id"]) and db.list_favourites(a) == []
+
+
+def test_conversation_endpoints_hide_other_users():
+    from fastapi.testclient import TestClient
+    import main
+    with _fresh_db() as (db, _):
+        alice, bob = TestClient(main.app), TestClient(main.app)
+        assert alice.get("/conversations").status_code == 401
+        alice.post("/auth/signup", json={"username": "alice", "password": "secret123",
+                                         "email": "a@example.com"})
+        bob.post("/auth/signup", json={"username": "bob", "password": "secret456",
+                                       "email": "b@example.com"})
+        cid = db.new_conversation_id()
+        db.save_turn(db.find_user("alice")["id"], cid, "q", "a", {"final_answer": "a"})
+        assert alice.get(f"/conversations/{cid}").status_code == 200
+        assert bob.get(f"/conversations/{cid}").status_code == 404
+        assert bob.delete(f"/conversations/{cid}").status_code == 404
+        pin = alice.post("/favourites", json={"question": "is ceph healthy"}).json()
+        assert bob.delete(f"/favourites/{pin['id']}").status_code == 404
+        assert alice.post("/favourites", json={"question": "  "}).status_code == 400
+
+
+def test_history_rows_are_long_format():
+    """One row per series per point, so any number of lines can be drawn."""
+    from tools.prometheus_tool import _series_rows
+    matrix = [
+        {"metric": {"instance": "192.168.1.30:9100"},
+         "values": [[1700000000, "10.5"], [1700000060, "12"]]},
+        {"metric": {"instance": "192.168.1.31:9100"},
+         "values": [[1700000000, "bad"], [1700000060, "3"]]},
+    ]
+    rows = _series_rows(matrix, "%", {"server02": "192.168.1.30:9100"})
+    assert [r["series"] for r in rows] == ["server02", "server02", "192.168.1.31:9100"]
+    assert rows[0] == {"time": "2023-11-14T22:13:20Z", "series": "server02",
+                       "host": "server02", "value": 10.5, "unit": "%"}
+
+
+def test_history_is_stripped_unless_a_period_is_asked_for():
+    """The extractor fills blanks; a chart nobody asked for is the same bug as a
+    date filter nobody asked for."""
+    from agent.arg_guard import scrub
+    args = {"metric": "cpu", "history_minutes": 60}
+    cleaned, dropped = scrub(dict(args), "what's the CPU on server02")
+    assert "history_minutes" not in cleaned and dropped
+    kept, dropped = scrub(dict(args), "CPU on server02 over the last hour")
+    assert kept.get("history_minutes") == 60 and not dropped

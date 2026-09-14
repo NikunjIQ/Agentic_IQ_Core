@@ -7,6 +7,10 @@ instantly.
 The TTL is deliberately short. This is monitoring data — an answer about which
 hosts are down goes stale in seconds, so the cache exists to absorb repeats
 within one conversation, not to remember anything.
+
+Keyed by user as well as by question: every answer is built from the asker's own
+systems, so the same words from two people are two different questions, and
+serving one account's answer to another would hand over their estate.
 """
 
 import hashlib
@@ -31,8 +35,19 @@ def _normalise(question: str) -> str:
     return " ".join(str(question or "").lower().split()).strip(" ?.!")
 
 
-def build_key(question: str, conversation_history=None) -> str:
-    """Cache key over the question plus the turns that give it meaning.
+def _owner(user):
+    """The explicit user, else whoever is signed in for this request, else None."""
+    if user is not None:
+        return user
+    try:
+        from agent.config_store import current_user_id
+        return current_user_id()
+    except Exception:
+        return None
+
+
+def build_key(question: str, conversation_history=None, user=None) -> str:
+    """Cache key over the user, the question, and the turns that give it meaning.
 
     "what about server02?" means different things depending on what preceded it,
     so history is part of the identity of the question, not context around it.
@@ -40,6 +55,7 @@ def build_key(question: str, conversation_history=None) -> str:
     from agent.history import recent_turns
 
     payload = {
+        "user": _owner(user),
         "question": _normalise(question),
         "history": [f"{t['role']}:{_normalise(t['content'])[:200]}"
                     for t in recent_turns(conversation_history)],
@@ -52,7 +68,7 @@ def should_bypass(question: str) -> bool:
     return any(hint in text for hint in _BYPASS_HINTS)
 
 
-def get(question: str, conversation_history=None, ttl: int = None):
+def get(question: str, conversation_history=None, ttl: int = None, user=None):
     """A cached payload, or None. Expired and bypassed reads both count as misses."""
     ttl = DEFAULT_TTL_SECONDS if ttl is None else ttl
     if ttl <= 0:
@@ -62,7 +78,7 @@ def get(question: str, conversation_history=None, ttl: int = None):
             _stats["bypasses"] += 1
         return None
 
-    key = build_key(question, conversation_history)
+    key = build_key(question, conversation_history, user)
     now = time.time()
     with _lock:
         entry = _entries.get(key)
@@ -92,7 +108,7 @@ def get(question: str, conversation_history=None, ttl: int = None):
     return None
 
 
-def put(question: str, payload: dict, conversation_history=None) -> None:
+def put(question: str, payload: dict, conversation_history=None, user=None) -> None:
     """Store a successful answer. Failures are never cached.
 
     Caching an error would keep serving a rate-limit message after the limit
@@ -103,12 +119,13 @@ def put(question: str, payload: dict, conversation_history=None) -> None:
     if not str(payload.get("final_answer") or "").strip():
         return
 
-    key = build_key(question, conversation_history)
+    owner = _owner(user)
+    key = build_key(question, conversation_history, owner)
     with _lock:
         if len(_entries) >= MAX_ENTRIES:
             oldest = min(_entries, key=lambda k: _entries[k]["stored_at"])
             _entries.pop(oldest, None)
-        _entries[key] = {"payload": payload, "stored_at": time.time()}
+        _entries[key] = {"payload": payload, "stored_at": time.time(), "user": owner}
         _stats["stores"] += 1
 
 
@@ -124,3 +141,10 @@ def stats() -> dict:
 def clear() -> None:
     with _lock:
         _entries.clear()
+
+
+def clear_user(user) -> None:
+    """Drop one user's answers, after they change their own settings."""
+    with _lock:
+        for key in [k for k, e in _entries.items() if e.get("user") == user]:
+            _entries.pop(key, None)

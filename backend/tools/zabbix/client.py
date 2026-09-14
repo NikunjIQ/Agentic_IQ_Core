@@ -1,7 +1,5 @@
 """Authentication and JSON-RPC transport for the Zabbix API."""
 
-import os
-
 from tools import clients
 
 
@@ -41,20 +39,21 @@ def build_rpc():
     """Return a callable issuing authenticated JSON-RPC calls.
 
     Credentials are read at call time rather than at import. They can be changed
-    through the UI while the process runs, and every tool reads os.getenv at the
-    moment it executes so a saved config takes effect without a restart.
+    through the UI while the process runs, and every tool reads the signed-in
+    user's own settings at the moment it executes so a saved config takes effect without a restart.
 
     A token is preferred; user/password falls back to user.login. Neither being
     present is not an error here — Zabbix answers some methods unauthenticated,
     and a real failure surfaces as an API error with a readable message.
     """
-    zabbix_url = os.getenv("ZABBIX_URL", "http://192.168.1.205:8080")
+    clients._ensure_config("Zabbix")
+    zabbix_url = clients.cfg("ZABBIX_URL", "http://192.168.1.205:8080")
     if not zabbix_url.endswith("api_jsonrpc.php"):
         zabbix_url = zabbix_url.rstrip("/") + "/api_jsonrpc.php"
 
-    zabbix_token = os.getenv("ZABBIX_API_TOKEN", "")
-    zabbix_user = os.getenv("ZABBIX_USER", "")
-    zabbix_pass = os.getenv("ZABBIX_PASS", "")
+    zabbix_token = clients.cfg("ZABBIX_API_TOKEN", "")
+    zabbix_user = clients.cfg("ZABBIX_USER", "")
+    zabbix_pass = clients.cfg("ZABBIX_PASS", "")
 
     headers = {"Content-Type": "application/json-rpc"}
 

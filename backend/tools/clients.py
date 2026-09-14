@@ -15,17 +15,33 @@ import requests
 from requests.auth import HTTPBasicAuth
 
 
-def _ensure_config():
-    """Merge credentials saved through the UI before reading the environment.
+def _ensure_config(service: str = None):
+    """Apply saved system settings, then check the caller's account.
 
-    Clients are built per call and read os.getenv at that moment, so doing this
-    here covers every entry point rather than only the FastAPI app.
+    With a signed-in user in context, a service they have not connected raises
+    config_store.NotConnected here — in the client's constructor, before any
+    request is made — rather than falling back to someone else's credentials.
     """
     try:
         from agent.config_store import ensure_applied
         ensure_applied()
     except Exception:
         pass
+    if service:
+        from agent.config_store import require
+        require(service)
+
+
+def cfg(key: str, default: str = "") -> str:
+    """A setting for the current request: the signed-in user's own value for a
+    service field, the environment for everything else.
+
+    Read in constructors only. ZammadClient.tickets_by_id fans work out over a
+    thread pool, and a pooled thread does not carry the request's user — it is
+    safe because the credentials were captured in __init__, before the pool.
+    """
+    from agent.config_store import get
+    return get(key, default)
 
 
 # One extra attempt by default. Set IQCORE_HTTP_RETRIES=0 to turn it off, which
@@ -100,14 +116,16 @@ TICKET_LINK_TAG = "__zbx_zammad_ticketlink"
 
 
 class Cached:
-    """One value with a TTL, plus a registry so every cache can be dropped at once.
+    """One value per signed-in user, with a TTL, plus a registry so every cache
+    can be dropped at once.
 
-    Five lookups across the app had each grown the same
-    {"value": ..., "fetched_at": ...} pattern, and config_store.reset_caches had
-    to reach into four modules by name to clear them — inside a bare `except`,
-    so renaming a key there fails silently and the app keeps serving data
-    fetched with the previous credentials. Registering here makes that
-    impossible to get wrong.
+    Per user, not per process: these hold data fetched with somebody's own
+    credentials — their Zammad tickets, their Zabbix devices — and one shared
+    slot would serve one account's estate to another. With nobody signed in (a
+    script, the eval harness) everything shares the None slot, as before.
+
+    The registry exists because config_store.reset_caches used to reach into four
+    modules by name inside a bare `except`, where a renamed key fails silently.
     """
 
     _registry = []
@@ -117,35 +135,54 @@ class Cached:
         # environment once at import and one that can change are both sayable.
         self.name = name
         self._ttl = ttl
-        self.value = None
-        self.stored_at = 0.0
+        self._slots = {}              # owner -> (value, stored_at)
         Cached._registry.append(self)
 
     @property
     def ttl(self) -> float:
         return self._ttl() if callable(self._ttl) else self._ttl
 
+    @property
+    def value(self):
+        """This owner's last value, expired or not — for "stale beats empty"."""
+        slot = self._slots.get(_owner())
+        return slot[0] if slot else None
+
     def get(self):
         """The cached value, or None when it is absent or has expired."""
-        if self.value is not None and time.time() - self.stored_at < self.ttl:
-            return self.value
+        slot = self._slots.get(_owner())
+        if slot and slot[0] is not None and time.time() - slot[1] < self.ttl:
+            return slot[0]
         return None
 
     def put(self, value):
-        self.value = value
-        self.stored_at = time.time()
+        self._slots[_owner()] = (value, time.time())
         return value
 
     def clear(self):
-        self.value = None
-        self.stored_at = 0.0
+        self._slots.clear()
 
     @classmethod
     def clear_all(cls) -> list:
-        """Drop every registered cache; returns their names, for the UI."""
+        """Drop every registered cache, for everyone; returns their names."""
         for cache in cls._registry:
             cache.clear()
         return [cache.name for cache in cls._registry]
+
+    @classmethod
+    def clear_owner_all(cls, owner) -> list:
+        """Drop one user's entries from every cache, after they change settings."""
+        for cache in cls._registry:
+            cache._slots.pop(owner, None)
+        return [cache.name for cache in cls._registry]
+
+
+def _owner():
+    try:
+        from agent.config_store import current_user_id
+        return current_user_id()
+    except Exception:
+        return None
 
 
 # Pulling the whole ticket estate takes 12-30s. A question that needs two cuts of
@@ -166,19 +203,19 @@ _TICKET_CACHE = Cached("zammad tickets", TICKET_CACHE_TTL)
 # ---------------------------------------------------------------------------
 class ZabbixClient:
     def __init__(self):
-        _ensure_config()
-        url = os.getenv("ZABBIX_URL", "http://192.168.1.205:8080").rstrip("/")
+        _ensure_config("Zabbix")
+        url = cfg("ZABBIX_URL", "http://192.168.1.205:8080").rstrip("/")
         if not url.endswith("api_jsonrpc.php"):
             url += "/api_jsonrpc.php"
         self.url = url
         self.headers = {"Content-Type": "application/json-rpc"}
         self._auth = None
 
-        token = os.getenv("ZABBIX_API_TOKEN", "")
+        token = cfg("ZABBIX_API_TOKEN", "")
         if token:
             self.headers["Authorization"] = f"Bearer {token}"
         else:
-            user, password = os.getenv("ZABBIX_USER", ""), os.getenv("ZABBIX_PASS", "")
+            user, password = cfg("ZABBIX_USER", ""), cfg("ZABBIX_PASS", "")
             if user and password:
                 # 6.4+ renamed the login param from "user" to "username"
                 for key in ("username", "user"):
@@ -261,13 +298,13 @@ _PROM_NODE_CACHE = Cached("prometheus nodes", PROM_NODE_CACHE_TTL)
 
 class PrometheusClient:
     def __init__(self):
-        _ensure_config()
-        self.url = os.getenv("PROMETHEUS_URL", "http://192.168.1.29:9190").rstrip("/")
-        user = os.getenv("PROMETHEUS_USER", "")
-        password = os.getenv("PROMETHEUS_PASS", "")
+        _ensure_config("Prometheus")
+        self.url = cfg("PROMETHEUS_URL", "http://192.168.1.29:9190").rstrip("/")
+        user = cfg("PROMETHEUS_USER", "")
+        password = cfg("PROMETHEUS_PASS", "")
         self.auth = HTTPBasicAuth(user, password) if user else None
         self.headers = {}
-        token = os.getenv("PROMETHEUS_TOKEN", "")
+        token = cfg("PROMETHEUS_TOKEN", "")
         if token:
             self.headers["Authorization"] = f"Bearer {token}"
 
@@ -348,11 +385,11 @@ def canonical_level(raw: str) -> str:
 
 class OpenSearchClient:
     def __init__(self):
-        _ensure_config()
-        self.url = os.getenv("OPENSEARCH_URL", "http://192.168.1.32:9200").rstrip("/")
-        self.index = os.getenv("OPENSEARCH_INDEX", "flog-*")
-        user = os.getenv("OPENSEARCH_USER", "")
-        password = os.getenv("OPENSEARCH_PASS", "")
+        _ensure_config("OpenSearch")
+        self.url = cfg("OPENSEARCH_URL", "http://192.168.1.32:9200").rstrip("/")
+        self.index = cfg("OPENSEARCH_INDEX", "flog-*")
+        user = cfg("OPENSEARCH_USER", "")
+        password = cfg("OPENSEARCH_PASS", "")
         self.auth = HTTPBasicAuth(user, password) if user else None
 
     def search(self, body: dict, path: str = "_search") -> dict:
@@ -402,15 +439,15 @@ class CephDaemonLogClient:
 
     def __init__(self):
         _ensure_config()
-        raw = os.getenv("OPENSEARCH2_URL", "https://192.168.1.152:9200").rstrip("/")
+        raw = cfg("OPENSEARCH2_URL", "https://192.168.1.152:9200").rstrip("/")
         if not raw.startswith("http"):
             raw = "https://" + raw
         self.url = raw
-        self.index = os.getenv("OPENSEARCH2_CEPH_INDEX", "podman-20*")
-        user = os.getenv("OPENSEARCH2_USER", "")
-        password = os.getenv("OPENSEARCH2_PASS", "")
+        self.index = cfg("OPENSEARCH2_CEPH_INDEX", "podman-20*")
+        user = cfg("OPENSEARCH2_USER", "")
+        password = cfg("OPENSEARCH2_PASS", "")
         self.auth = HTTPBasicAuth(user, password) if user else None
-        self.verify = str(os.getenv("OPENSEARCH2_VERIFY_TLS", "false")).lower() in (
+        self.verify = str(cfg("OPENSEARCH2_VERIFY_TLS", "false")).lower() in (
             "1", "true", "yes")
         if not self.verify:
             # Same reason as CephClient: a self-signed certificate would
@@ -461,16 +498,16 @@ class CephDaemonLogClient:
 # ---------------------------------------------------------------------------
 class ZammadClient:
     def __init__(self):
-        _ensure_config()
-        self.url = os.getenv("ZAMMAD_URL", "http://192.168.1.205:8082").rstrip("/")
+        _ensure_config("Zammad")
+        self.url = cfg("ZAMMAD_URL", "http://192.168.1.205:8082").rstrip("/")
         self.headers = {}
         self.auth = None
 
-        token = os.getenv("ZAMMAD_API_TOKEN", "")
+        token = cfg("ZAMMAD_API_TOKEN", "")
         if token:
             self.headers["Authorization"] = f"Token token={token}"
         else:
-            user, password = os.getenv("ZAMMAD_USER", ""), os.getenv("ZAMMAD_PASS", "")
+            user, password = cfg("ZAMMAD_USER", ""), cfg("ZAMMAD_PASS", "")
             if user and password:
                 self.auth = HTTPBasicAuth(user, password)
 
@@ -689,15 +726,15 @@ class CephClient:
     """Read-only client for the Ceph mgr dashboard API."""
 
     def __init__(self):
-        _ensure_config()
-        self.url = os.getenv("CEPH_URL", "").rstrip("/")
+        _ensure_config("Ceph")
+        self.url = cfg("CEPH_URL", "").rstrip("/")
         # The dashboard's browser URL carries a frontend fragment that the API
         # layer never sees; strip it so a pasted address still works.
         if "/#" in self.url:
             self.url = self.url.split("/#")[0].rstrip("/")
-        self.user = os.getenv("CEPH_USER", "")
-        self.password = os.getenv("CEPH_PASS", "")
-        self.verify = str(os.getenv("CEPH_VERIFY_TLS", "false")).lower() in ("1", "true", "yes")
+        self.user = cfg("CEPH_USER", "")
+        self.password = cfg("CEPH_PASS", "")
+        self.verify = str(cfg("CEPH_VERIFY_TLS", "false")).lower() in ("1", "true", "yes")
         if not self.verify:
             try:
                 import urllib3

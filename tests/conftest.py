@@ -24,6 +24,13 @@ if str(BACKEND) not in sys.path:
 # backend import, since the TTL is read at module load.
 os.environ.setdefault("ZAMMAD_CACHE_TTL", "900")
 
+# The suite must never touch the real database or its encryption key. Set before
+# any backend import, because main.py initialises the database when imported.
+import tempfile as _tempfile
+_scratch = _tempfile.mkdtemp(prefix="iqcore-tests-")
+os.environ.setdefault("IQCORE_DB_PATH", os.path.join(_scratch, "iqcore.db"))
+os.environ.setdefault("IQCORE_SECRET_KEY_PATH", os.path.join(_scratch, "secret.key"))
+
 try:
     from dotenv import load_dotenv
     load_dotenv(BACKEND / ".env")

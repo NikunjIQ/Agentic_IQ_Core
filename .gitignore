@@ -7,6 +7,8 @@
 !.env.example
 credentials.json
 authentication.json
+# The database and its WAL/SHM side files. secret.key is covered by *.key.
+iqcore.db*
 **/.streamlit/secrets.toml
 secrets.toml
 *.pem

@@ -4,10 +4,46 @@ Written to carry context into a fresh session. It covers what the app is, how it
 built, why it is built that way, what is wrong with it, and what was planned next.
 
 Repo: `https://github.com/NikunjIQ/Agentic_IQ_Core` (private)
-Local: `C:\Users\NikunjSinha(Identiqa\Desktop\Agentic_IQ_Core`
-Scale: ~11,700 lines of Python across 53 files.
-Tests: pytest. `pytest -m "not live and not llm"` is the free offline tier (~8s);
-`pytest` adds the live tool checks. See §Tests in README.md.
+Local: `C:\Users\HP\Desktop\Agentic_IQ_Core-main` (also `C:\Users\NikunjSinha(Identiqa\Desktop\Agentic_IQ_Core` on the work machine)
+Scale: ~12,100 lines of Python across 52 files, plus ~2,500 lines of static UI.
+Tests: pytest. `pytest -m "not live and not llm"` is the free offline tier (122 tests,
+~13s). Plain `pytest` also runs 74 `live` tests against the real estate and takes
+many minutes. See §Tests in README.md.
+
+---
+
+## 0. Current state — read first
+
+**Last commit on main:** `821244d` (static page served by FastAPI, login gate).
+
+**Built and verified, NOT yet committed** (waiting for the user's go-ahead):
+
+1. **SQLite** replaced the JSON files: users, sessions, credit accounts, usage, per-user
+   encrypted service credentials, plus `turns` and `favourites`. See `agent/db.py`.
+2. **Per-user credentials.** Each user connects their own systems; a question about an
+   unconnected system says so instead of borrowing someone else's. Enforced by a
+   ContextVar (`config_store.use_user`), per-owner client caches and a user-keyed answer cache.
+3. **Charts in answers** — bar (with "Chart by"), line (hover crosshair), treemap.
+4. **Prometheus history** — `query_prometheus(history_minutes=…)` does a range query and
+   returns long-format `{time, series, host, value, unit}` rows. `arg_guard` strips it
+   unless the question mentions a period.
+5. **Dark mode** — CSS variables; SVG drawn with classes, not hard-coded colours.
+6. **Saved conversations + pinned questions** — History drawer; six endpoints, every one
+   scoped to the signed-in user (another user's id is a 404).
+
+Accounts in the local DB: `nikunj` (admin, a test account), `Nikunj231_` (the user's own,
+regular), `prachiyash`, `priya` (test). Promoting `Nikunj231_` and deleting the test
+accounts was offered and not yet answered.
+
+**Working rules the user has set:**
+
+- **Commit/push only when the user explicitly says so**, and **directly on `main`** — never a branch.
+- **Never commit** `credentials.json`, `authentication.json`, `iqcore.db*`, `secret.key`
+  (all gitignored).
+- Files are **LF**. On Windows, write with `write_bytes(text.encode())`, not `write_text`,
+  or the whole file shows as changed.
+- The user likes lean code (the "ponytail" style): reuse what exists, shortest working
+  diff, no speculative abstractions.
 
 ---
 
@@ -82,7 +118,7 @@ as a value.
 
 | File | Lines | Role |
 |---|---:|---|
-| `main.py` | 227 | FastAPI. `/chat/stream`, `/config`, `/config/test`, `/health`. **`/config` and `/config/test` are deliberately sync `def`, not `async`** — see §6. |
+| `main.py` | 460 | FastAPI. Serves the page at `/` (asset links stamped with mtime, `no-store`) and the API: `/auth/{status,login,signup,logout}`, `/me`, `/config`, `/config/test`, `/admin/credits`, `/chat/stream`, `/conversations[/{id}]`, `/favourites[/{id}]`, `/health`. `current_user` / `admin_user` dependencies read the session cookie. `/chat/stream` charges usage and saves the turn **before** the `done` event, so the meter never lags. **`/config` and `/config/test` are deliberately sync `def`, not `async`** — see §8. |
 
 ### `backend/agent/` — orchestration
 
@@ -98,13 +134,15 @@ as a value.
 | `metadata.py` | 121 | Fetches live host groups / ticket states / Prometheus nodes and injects them into extraction prompts so the model uses real values. 5-min cache. |
 | `coverage.py` | 115 | States what an answer could not see — truncated tables, empty results that mean "not collected here". |
 | `arg_guard.py` | 75 | Strips filters the question never asked for. |
-| `answer_cache.py` | 126 | 60s TTL, keyed on question + history. Never caches errors. |
+| `answer_cache.py` | 150 | 60s TTL, keyed on user + question + history — one account's answer is never served to another. Never caches errors. |
 | `telemetry.py` | 149 | Per-call token usage from Groq's own figures. Never estimates. |
 | `streaming.py` | 162 | SSE events: `status`, `node`, `tool`, `token`. Degrades to unmeasured rather than raising. |
 | `history.py` | 48 | Recent conversation turns, truncated. |
 | `voice.py` | 65 | Answer style. |
 | `suggestions.py` | 98 | Deterministic follow-up chips. No model call. |
-| `config_store.py` | 206 | Credentials saved through the UI. `ensure_applied()` is called by every client. |
+| `config_store.py` | 318 | Per-request settings. `get()` answers from the signed-in user's own credentials; `require()` raises `NotConnected` for a system they haven't connected. The Groq key stays a system setting. |
+| `db.py` | 473 | SQLite (stdlib `sqlite3`, WAL, foreign keys on, one connection per operation). Tables: `users`, `sessions` (only the cookie's sha256), `credit_accounts`, `usage` (one row per answer, integer paise), `service_credentials` (Fernet-encrypted), `turns` (saved Q&A + trimmed payload), `favourites` (unique per user+question); view `credit_balance` computes spent/remaining. Schema is `IF NOT EXISTS`, so new tables appear on next start. Imports the old JSON files once, into an empty database. |
+| `auth_store.py` | 75 | Sign-up and password checks (salted PBKDF2). The first account is the admin. |
 | `config_test.py` | 266 | Connection tests for each system. Deliberately does **not** retry — see §6. |
 
 ### `backend/agent/nodes/`
@@ -121,9 +159,9 @@ as a value.
 
 | File | Lines | Role |
 |---|---:|---|
-| `clients.py` | 831 | Shared API clients for every system, plus `request()` — the retry helper all HTTP goes through. |
+| `clients.py` | 898 | Shared API clients for every system, plus `request()` — the retry helper all HTTP goes through. Credentials read through `cfg()`; `Cached` keeps one slot per user; `PrometheusClient.over_time()` does range queries. |
 | `ceph_tool.py` | 677 | Ceph cluster: health, capacity (raw *and* usable), pools, OSDs, hosts, RBD images, snapshots, CephFS, CRUSH, cluster logs, monitoring endpoints. 12 query types. |
-| `prometheus_tool.py` | 595 | Host metrics and OpenStack/VMs. `_vm_inventory()` resolves libvirt domains to OpenStack identity. |
+| `prometheus_tool.py` | 650 | Host metrics and OpenStack/VMs. `_vm_inventory()` resolves libvirt domains to OpenStack identity. `history_minutes` switches a host metric to a range query; `_series_rows()` returns long-format rows and the summary carries latest/min/max per series. |
 | `zammad_tool.py` | 524 | Tickets, states, agents, SLA, tags, search, queues, time accounting. |
 | `correlation.py` | 402 | **Zabbix ↔ Zammad** join on the webhook's ticket-id tag. |
 | `opensearch_tool.py` | 280 | OpenStack service logs (`flog-*`). |
@@ -139,21 +177,26 @@ no second process and no CORS: the page and the API share an origin.
 
 | File | Role |
 |---|---|
-| `index.html` | Two pages, Chat and Connections, switched by the top nav on a hash route. |
-| `app.css` | The whole design system. Warm monochrome, system font stacks (no CDN — this runs on a private LAN). |
-| `app.js` | SSE reader, answer rendering, sortable tables, the CRUSH treemap, pricing, and the credentials form. |
+| `index.html` | 168 lines. Sign-in gate; sticky top bar (History, Chat / Connections / Users tabs, spend meter, theme toggle, sign out); History drawer; three pages on a hash route. An inline `<head>` script applies the saved theme before first paint. |
+| `app.css` | 1,056 lines. The whole design system. Every colour is a variable in `:root`; dark mode overrides them under `[data-theme="dark"]` and `prefers-color-scheme`. System font stacks (no CDN — private LAN). |
+| `app.js` | 1,309 lines. `api()` (401 → sign-in gate), SSE reader over fetch (EventSource is GET-only), markdown, sortable tables, flow graph, treemap, **bar/line charts chosen from column names in `renderPayload`**, pricing and spend meter, credentials form, admin credits, History drawer and pins. |
+
+Stack is deliberately plain: no React/bundler. The user once asked why there is no
+separate frontend (Streamlit used to be one); answer given: one process, one origin, no
+CORS, nothing to build — the API is still cleanly separate and a SPA could replace the
+page later.
 
 ### `tests/`
 
 | File | Lines | Role |
 |---|---:|---|
-| `test_units.py` | 1,501 | Offline tier. Free, ~8s. One test carries `.mark.llm` and is held back by default. |
+| `test_units.py` | 1,769 | Offline tier (122 tests). Free, ~13s. Covers the database (schema, auth, sessions, credits, per-user isolation, turns, favourites, endpoint scoping) as well as the agent. One test carries `.mark.llm` and is held back by default. |
 | `test_tools_live.py` | 855 | Live tool checks against the real systems. No model calls. |
 | `routing_cases.py` | 208 | `question -> expected tool` corpus, in three kinds: unambiguous, collisions, and should-ask. |
 | `score_routing.py` | 245 | Scores classify accuracy. Opt-in, spends tokens, `--only` narrows it. |
 | `golden_queries.py` | 257 | Argument-level query sets and the team's real sample questions. |
 | `test_extraction_llm.py` | 124 | NL → argument extraction evals. Paced, spends tokens. |
-| `conftest.py` | 44 | Path + env bootstrap, auto-loaded by pytest. **Applies `credentials.json`** — anything touching tools needs this. |
+| `conftest.py` | 51 | Path + env bootstrap, auto-loaded by pytest. **Applies `credentials.json`**, and points the database at a scratch file so a test run never touches `iqcore.db`. |
 | `pytest.ini` | — | At the repo root. `testpaths = tests` and `addopts = -m "not llm"`, so the default run never spends tokens. |
 
 ---
@@ -454,8 +497,10 @@ Detailed plans exist in `~/.claude/plans/groovy-mapping-rabbit.md`.
 
 ### Housekeeping
 
-Add logging (there is still no `import logging` anywhere); pin dependencies; add auth
-to the API; remove hardcoded IP fallbacks; cap `raw` payloads.
+Add logging (there is still no `import logging` anywhere); pin dependencies; remove
+hardcoded IP fallbacks; cap `raw` payloads in live responses (stored turns are already
+trimmed). Auth: add password reset, lockout/rate limiting, and close open sign-up.
+`auth_store.user_count()` is dead.
 
 ### The bigger question, honestly
 
@@ -490,7 +535,8 @@ variable, and `score_routing.py` can measure whether a stronger model fixes them
    sharing no vocabulary with the reported case.
 9. **Measure before optimising, and never estimate tokens.**
 10. **Instrumentation must never cost an answer.**
-11. **`conftest.py` applies `credentials.json`.** Any script touching the tools needs
+11. **`conftest.py` applies `credentials.json` and uses a scratch database.** A script
+    that touches the tools with nobody signed in reads the environment, so it needs
     `ensure_applied()`, or it runs unconfigured and reports "not authorized" as though
     the system were down.
 
@@ -498,10 +544,12 @@ variable, and `score_routing.py` can measure whether a stronger model fixes them
 
 ## 12. Operational notes
 
-**Credentials.** `.env` and `credentials.json` are both read; saved config wins.
-Neither is in git, so **a fresh clone has no credentials**. All systems plus Groq can
-be entered on the **Connections** page, which can **Test** each connection before
-saving.
+**Credentials.** Each user's service credentials live in `backend/iqcore.db`,
+encrypted with `backend/secret.key` (or `IQCORE_SECRET_KEY`); the Groq key stays in
+`.env` / `credentials.json`. None of them are in git, so **a fresh clone has no
+accounts and no credentials** — the first account created is the admin, and each user
+connects their own systems on the **Connections** page, which can **Test** each
+connection before saving. Back up `iqcore.db` and `secret.key` together.
 
 **Ceph specifics.** `CEPH_URL` must be the API base (`https://192.168.1.30:8443`), not
 the dashboard's browser address. `CEPH_VERIFY_TLS=false` for the self-signed cert.
@@ -523,5 +571,11 @@ screenshot.
 **Windows note:** `pkill` does not exist; use `Stop-Process`. A stale uvicorn holding
 port 8000 produces `WinError 10013`.
 
-**Running it.** `.claude/launch.json` starts the frontend; the backend is
-`cd backend && uvicorn main:app --host 0.0.0.0 --port 8000`.
+**Running it.** One process serves page and API:
+`cd backend && uvicorn main:app --host 0.0.0.0 --port 8000` (on a VM), then open
+`http://<host>:8000`. Locally, `.claude/launch.json` (config `iqcore`) runs the same
+with `.venv/Scripts/python.exe` on 127.0.0.1:8000. Python lives in `.venv`; the system
+Python has no pytest.
+
+**Viewing the database.** Open `backend/iqcore.db` in DB Browser for SQLite (read-only
+while the app runs). Service secrets show as ciphertext by design.

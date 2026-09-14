@@ -89,6 +89,7 @@ SURFACE = {
         "volumes": ("Cinder volume", "snapshot COUNTS"),
         "containers": ("containers",),
         "promql": ("PromQL",),
+        "history": ("over time", "trend"),
     },
     "query_opensearch": {
         "date_filter": ("logs",),
@@ -251,7 +252,7 @@ CONTEXT_STEMS = ("escalat", "replicat", "monitor", "utilis", "utiliz")
 NOT_AN_ANCHOR = {
     "status", "health", "free", "space", "counts", "times", "levels",
     "changes", "states", "response", "breakdowns", "one", "service",
-    "named", "search", "object", "monitoring", "details",
+    "named", "search", "object", "monitoring", "details", "over", "time",
 }
 
 
