@@ -1,3 +1,4 @@
+import concurrent.futures
 import re
 from datetime import datetime, timezone, timedelta
 from typing import Optional
@@ -45,30 +46,61 @@ def _target_label(minutes) -> str:
     return f"{value // 60}h {value % 60}m" if value < 1440 else f"{value / 1440:.1f}d"
 
 
-def _window_mask(df: pd.DataFrame, column: str, date_filter: str) -> Optional[pd.Series]:
-    """Translate a relative date phrase into a mask over one timestamp column."""
-    if column not in df.columns or not date_filter:
-        return None
+# The team works in India, so "today" starts at midnight IST, not UTC — which
+# otherwise still meant yesterday until 05:30.
+IST = timezone(timedelta(hours=5, minutes=30))
 
-    text = date_filter.lower()
-    now = datetime.now(timezone.utc)
+# Raw tickets returned for the debug panel. Every ticket in the estate is ~5.7 MB.
+RAW_ROWS = 500
+
+
+def _window(date_filter: str, now: datetime) -> Optional[tuple]:
+    """(start, end) for a relative date phrase, end None meaning "until now".
+
+    None for a phrase this does not understand, so the caller applies no filter
+    rather than a wrong one.
+    """
+    text = (date_filter or "").lower()
     today = now.date()
-    series = df[column]
+
+    def midnight(day):
+        return datetime.combine(day, datetime.min.time(), IST)
 
     if "today" in text:
-        return series.dt.date == today
+        return midnight(today), None
     if "yesterday" in text:
-        return series.dt.date == (today - timedelta(days=1))
+        return midnight(today - timedelta(days=1)), midnight(today)
     if "this month" in text:
-        return (series.dt.month == today.month) & (series.dt.year == today.year)
+        return midnight(today.replace(day=1)), None
     if "this week" in text:
-        return series.dt.date >= (today - timedelta(days=today.weekday()))
+        return midnight(today - timedelta(days=today.weekday())), None
 
     match = re.search(r"(\d+)\s*day", text)
     if match:
-        cutoff = now - timedelta(days=int(match.group(1)))
-        return series >= cutoff
+        return now - timedelta(days=int(match.group(1))), None
     return None
+
+
+def _range_query(field: str, window: tuple) -> str:
+    """Zammad search syntax for a window. Only the [a TO b] form works: the
+    `field:>=value` form returns zero matches, with no error, on this server."""
+    start, end = (f"{t.astimezone(timezone.utc):%Y-%m-%dT%H:%M:%SZ}" if t else "*"
+                  for t in window)
+    return f"{field}:[{start} TO {end}]"
+
+
+def _quote(value: str) -> str:
+    return '"' + str(value).replace('"', '\\"') + '"'
+
+
+def _absent_note(search: str) -> str:
+    # An empty text search is a real finding, and the reason matters: nothing in
+    # this helpdesk is created by Ceph or Prometheus.
+    return (f" NOTE: no ticket mentions '{search}'. Tickets here are raised "
+            f"automatically only by Zabbix; Prometheus and Ceph have no "
+            f"ticket integration, so an alert from those systems would "
+            f"never create one. This is a genuine absence, not a gap in "
+            f"the search.")
 
 
 def _within_days(series: pd.Series, days: int, now: datetime) -> pd.Series:
@@ -148,29 +180,88 @@ def query_zammad(
     alert means no integration exists, not that the alert was handled.
     """
     client = ZammadClient()
-    tickets = client.all_tickets()
+    now = datetime.now(IST)
+    today = now.date()
+    date_column = _DATE_FIELDS.get((date_field or "created").lower(), "created_at_dt")
+    window = _window(date_filter, now) if date_filter else None
+
+    state_names = [s.strip() for s in (state_filter or "").split(",") if s.strip()]
+    tags = [t.strip() for t in str(tag_filter or "").split(",") if t.strip()]
+
+    # Filters Zammad applies itself, each checked against the full download by a
+    # live test (test_zammad_server_filters_match_the_estate). Owner, priority,
+    # customer and organisation are not here: priority.name returned 0 with no
+    # error and owner.email an unrelated count, so they stay in pandas below.
+    clauses, pushed = [], []
+    if window:
+        clauses.append(_range_query(date_column[:-3], window))
+        pushed.append(f"{date_column[:-6]} within '{date_filter}' (IST)")
+    if state_names:
+        clauses.append("(" + " OR ".join(f"state.name:{_quote(s)}" for s in state_names) + ")")
+        pushed.append(f"state in {[s.lower() for s in state_names]}")
+    if search:
+        clauses.append(f"({search})")
+        pushed.append(f"text ~ '{search}'")
+    if tags:
+        clauses += [f"tags:{_quote(t)}" for t in tags]
+        pushed.append(f"tags include {tags}")
+
+    # A filtered question fetches only its matches (~1-6s) instead of the whole
+    # estate (~14s). Too many matches, or a failed search, falls back to the
+    # estate, and a failure never reads as "no tickets".
+    tickets, scoped = None, False
+    if clauses and not ticket_reference:
+        try:
+            tickets = client.search_all(" AND ".join(clauses))
+            scoped = tickets is not None
+        except Exception:
+            tickets = None
+    if tickets is None:
+        tickets = client.all_tickets()
+
+    if scoped and not tickets:
+        summary = (f"Current date: {today.isoformat()} (IST). FILTERED RESULT: "
+                   f"0 ticket(s) match [{'; '.join(pushed)}].")
+        if search and len(clauses) == 1:
+            summary += _absent_note(search)
+        return {"summary": summary, "dataframe": pd.DataFrame(), "raw": {"result": []}}
 
     if not tickets:
         return {"summary": "Retrieved 0 tickets from Zammad or the server returned an error.",
                 "dataframe": pd.DataFrame(), "raw": {"result": []}}
 
-    users = {}
-    try:
-        for u in (client.get("/api/v1/users", {"per_page": 200}) or []):
-            if "id" in u:
-                label = u.get("email") or f"{u.get('firstname', '')} {u.get('lastname', '')}".strip()
-                users[int(u["id"])] = label or str(u["id"])
-    except Exception:
-        pass
+    # Nine small lookups of ~0.5s each. One after another they were most of a
+    # filtered question's time; in parallel they cost about the slowest one.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=9) as pool:
+        lookups = {name: pool.submit(fn) for name, fn in {
+            "users": lambda: client.get("/api/v1/users", {"per_page": 200}) or [],
+            "states": client.state_map, "priorities": client.priority_map,
+            "orgs": client.organization_map, "groups": client.group_map,
+            "slas": client.slas, "overviews": client.overviews,
+            "tag_counts": client.tag_counts,
+            # Booked time is estate-wide by construction; beside a scoped fetch's
+            # figures it would read as belonging to them.
+            "entries": (lambda: []) if scoped else client.time_accountings,
+        }.items()}
 
-    states = client.state_map()
-    priorities = client.priority_map()
-    orgs = client.organization_map()
-    groups = client.group_map()
+    def looked_up(name):
+        try:
+            return lookups[name].result()
+        except Exception:
+            return {}
+
+    users = {}
+    for u in looked_up("users") or []:
+        if "id" in u:
+            label = u.get("email") or f"{u.get('firstname', '')} {u.get('lastname', '')}".strip()
+            users[int(u["id"])] = label or str(u["id"])
+
+    states = looked_up("states")
+    priorities = looked_up("priorities")
+    orgs = looked_up("orgs")
+    groups = looked_up("groups")
 
     df = pd.DataFrame(tickets)
-    now = datetime.now(timezone.utc)
-    today = now.date()
 
     def label_from(column, mapping, default=""):
         if column in df.columns:
@@ -192,7 +283,10 @@ def query_zammad(
 
     for column in ("created_at", "updated_at", "close_at", "first_response_at"):
         if column in df.columns:
-            df[column + "_dt"] = pd.to_datetime(df[column], errors="coerce", utc=True)
+            # In IST, so every .dt.date below — "created today", "this month" — is
+            # the team's calendar day.
+            df[column + "_dt"] = pd.to_datetime(df[column], errors="coerce",
+                                                utc=True).dt.tz_convert(IST)
 
     if "created_at_dt" in df.columns:
         df = df.sort_values("created_at_dt", ascending=False)
@@ -213,7 +307,13 @@ def query_zammad(
             df[flag] = numeric.where(numeric.isna(), numeric >= 0)
 
     # ---------------- estate-wide summary ----------------
-    parts = [f"Current date: {today.isoformat()}. Total tickets: {len(df)}."]
+    parts = [f"Current date: {today.isoformat()} (IST)."]
+    if scoped:
+        # Fetched for the filters alone, so every figure below covers only these.
+        parts.append(f"Tickets matching [{'; '.join(pushed)}]: {len(df)} — the "
+                     f"statistics below cover only these, not the whole helpdesk.")
+    else:
+        parts.append(f"Total tickets: {len(df)}.")
     parts.append(f"By state: {df['state_name'].value_counts().to_dict()}.")
     parts.append(f"By priority: {df['priority_name'].value_counts().to_dict()}.")
 
@@ -258,7 +358,7 @@ def query_zammad(
 
     # What the targets actually are. Attainment without the target is half an
     # answer: "96% within SLA" says nothing about which SLA or how demanding it is.
-    sla_definitions = client.slas()
+    sla_definitions = looked_up("slas")
     if sla_definitions:
         described = "; ".join(
             f"'{s.get('name')}' (first response {_target_label(s.get('first_response_time'))}, "
@@ -286,7 +386,7 @@ def query_zammad(
 
     # Booked time. The ticket payload carries time_unit, but the accounting
     # endpoint is what attributes it, so totals come from there.
-    entries = client.time_accountings()
+    entries = looked_up("entries")
     if entries:
         booked = 0.0
         per_ticket = {}
@@ -305,7 +405,7 @@ def query_zammad(
                          f"({busiest[1]:.1f}). Time is recorded on "
                          f"{len(per_ticket)} of {len(df)} tickets.")
 
-    queues = client.overviews()
+    queues = looked_up("overviews")
     if queues:
         parts.append(f"Named queues (overviews) available: "
                      f"{', '.join(repr(o.get('name')) for o in queues[:12])}.")
@@ -315,8 +415,9 @@ def query_zammad(
         parts.append(f"By organization: {org_counts.head(5).to_dict()} "
                      f"({int((df['organization_name'] == '(none)').sum())} have no organization).")
 
-    tag_counts = client.tag_counts()
-    if tag_counts:
+    tag_counts = looked_up("tag_counts")
+    # Estate-wide, like booked time: not stated beside a scoped fetch's figures.
+    if tag_counts and not scoped:
         top_tags = ", ".join(f"{t['tag']} ({t['tickets']})" for t in tag_counts[:8])
         parts.append(f"Total tags in use: {len(tag_counts)}. Largest tags: {top_tags}.")
 
@@ -372,9 +473,12 @@ def query_zammad(
 
     # ---------------- filters ----------------
     output = df
-    applied = []
+    # A scoped fetch already applied these on the server. Text and tags cannot be
+    # checked from a ticket row, so they only run here after an estate download;
+    # state and date are re-applied below either way, which keeps them exact.
+    applied = list(pushed) if scoped else []
 
-    if search:
+    if search and not scoped:
         # Free text is resolved server-side. Without this the tool could only
         # narrow by state or date, so "is there a ticket about X" was answered
         # with a count of tickets that had nothing to do with X.
@@ -388,21 +492,16 @@ def query_zammad(
                         f"{ZammadClient.SEARCH_CAP} tickets and that ceiling was "
                         f"reached, so the count below is a MINIMUM.")
         elif not ids:
-            # An empty text search is a real finding, and the reason matters:
-            # nothing in this helpdesk is created by Ceph or Prometheus.
-            summary += (f" NOTE: no ticket mentions '{search}'. Tickets here are raised "
-                        f"automatically only by Zabbix; Prometheus and Ceph have no "
-                        f"ticket integration, so an alert from those systems would "
-                        f"never create one. This is a genuine absence, not a gap in "
-                        f"the search.")
+            summary += _absent_note(search)
 
-    if tag_filter:
-        wanted = [t.strip() for t in str(tag_filter).split(",") if t.strip()]
-        matched = client.tickets_by_tags(wanted)
-        ids = {str(t.get("id")) for t in matched if t.get("id") is not None}
-        if "id" in output.columns:
-            output = output[output["id"].astype(str).isin(ids)]
-        applied.append(f"tags include {wanted}")
+    if tags:
+        wanted = tags
+        matched = [] if scoped else client.tickets_by_tags(wanted)
+        if not scoped:
+            ids = {str(t.get("id")) for t in matched if t.get("id") is not None}
+            if "id" in output.columns:
+                output = output[output["id"].astype(str).isin(ids)]
+            applied.append(f"tags include {wanted}")
 
         # Zammad's tag index is the authoritative count. Search returned 82 for a
         # tag the index counts at 83, so both are reported rather than picking one
@@ -445,10 +544,11 @@ def query_zammad(
             output = output[output["id"].astype(str).isin(ids)]
         applied.append(f"in queue '{queue.get('name')}'")
 
-    if state_filter:
-        wanted = [s.strip().lower() for s in state_filter.split(",") if s.strip()]
+    if state_names:
+        wanted = [s.lower() for s in state_names]
         output = output[output["state_name"].str.lower().isin(wanted)]
-        applied.append(f"state in {wanted}")
+        if not scoped:
+            applied.append(f"state in {wanted}")
     if priority_filter:
         needle = str(priority_filter).strip()
         if needle.isdigit():
@@ -465,12 +565,23 @@ def query_zammad(
     if organization_filter:
         output = output[_match_any(output["organization_name"], organization_filter)]
         applied.append(f"organization ~ '{organization_filter}'")
-    if date_filter:
-        column = _DATE_FIELDS.get((date_field or "created").lower(), "created_at_dt")
-        mask = _window_mask(output, column, date_filter)
-        if mask is not None:
-            output = output[mask.fillna(False)]
-            applied.append(f"{column.replace('_at_dt', '')} within '{date_filter}'")
+    if window and date_column in output.columns:
+        # Applied even to a scoped fetch: search bounds are inclusive, this is exact.
+        start, end = window
+        mask = output[date_column] >= start
+        if end is not None:
+            mask &= output[date_column] < end
+        output = output[mask.fillna(False)]
+        if not scoped:
+            applied.append(f"{date_column[:-6]} within '{date_filter}' (IST)")
+
+    # Only the tickets that matched, capped — never the whole estate.
+    if "id" in output.columns:
+        kept = set(output["id"].astype(str))
+        raw = {"result": [t for t in tickets if str(t.get("id")) in kept][:RAW_ROWS],
+               "matched": len(output)}
+    else:
+        raw = {"result": tickets[:RAW_ROWS], "matched": len(tickets)}
 
     if applied:
         summary += (f" FILTERED RESULT: {len(output)} ticket(s) match "
@@ -508,7 +619,7 @@ def query_zammad(
             summary += (f" Cannot group by '{group_by}'. Supported: "
                         f"{sorted(set(_GROUP_DIMENSIONS) | {'tag'})}.")
 
-        return {"summary": summary, "dataframe": output, "raw": {"result": tickets}}
+        return {"summary": summary, "dataframe": output, "raw": raw}
 
     # A raw ticket carries ~45 columns of ids, escalation stamps and preferences.
     # Previewing ten of those wastes most of the prompt on values nobody reads,
@@ -521,4 +632,4 @@ def query_zammad(
     if display_columns:
         output = output[display_columns]
 
-    return {"summary": summary, "dataframe": output, "raw": {"result": tickets}}
+    return {"summary": summary, "dataframe": output, "raw": raw}

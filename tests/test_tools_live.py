@@ -463,6 +463,39 @@ def test_zammad_paging_reaches_the_whole_estate():
     assert len({t["id"] for t in tickets}) == len(tickets), "duplicate tickets across pages"
 
 
+def test_zammad_server_filters_match_the_estate(monkeypatch):
+    """Every filter Zammad applies itself must return exactly the tickets that
+    filtering the full download does. A wrong field name here does not error:
+    priority.name returned 0 and owner.email an unrelated count, so a filter is
+    only pushed to the server once it passes this."""
+    from tools.clients import ZammadClient
+    from tools.zammad_tool import query_zammad
+
+    cases = [
+        {"date_filter": "last 10 days"},
+        {"date_filter": "last 10 days", "date_field": "closed"},
+        {"date_filter": "today", "date_field": "updated"},
+        {"state_filter": "open"},
+        {"state_filter": "Work in Progress,Escalated"},
+        {"state_filter": "new", "date_filter": "this month"},
+        {"search": "Zabbix agent"},
+        {"tag_filter": "host: 192.168.1.73", "date_filter": "last 10 days"},
+        {"tag_filter": "host: 192.168.1.73", "state_filter": "closed"},
+    ]
+    for args in cases:
+        scoped = query_zammad.invoke(dict(args))
+        assert ("not the whole helpdesk" in scoped["summary"]
+                or "FILTERED RESULT: 0" in scoped["summary"]), f"{args} was not scoped"
+        with monkeypatch.context() as m:
+            m.setattr(ZammadClient, "search_all", lambda self, q: None)
+            estate = query_zammad.invoke(dict(args))
+        if "MINIMUM" in estate["summary"]:
+            continue    # the old path is capped at 200 and cannot be the reference
+        got = set(scoped["dataframe"].get("number", []))
+        want = set(estate["dataframe"].get("number", []))
+        assert got == want, f"{args}: server {len(got)} vs estate {len(want)}"
+
+
 def test_prometheus_vms_resolve_to_names_not_domain_ids():
     from tools.prometheus_tool import query_prometheus
     df = query_prometheus.invoke({"metric": "vms"})["dataframe"]

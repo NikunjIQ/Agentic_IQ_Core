@@ -597,15 +597,22 @@ class ZammadClient:
         if cached is not None:
             return cached
 
-        tickets, page = [], 1
-        while page <= max_pages:
-            batch = self.get("/api/v1/tickets", {"page": page, "per_page": page_size})
-            if not batch:
-                break
-            tickets.extend(batch)
-            if len(batch) < page_size:
-                break
-            page += 1
+        # Zammad caps per_page at 100 whatever is asked, so the estate is ~48
+        # pages. Fetched 8 at a time: 4,794 tickets in ~14s rather than ~30s.
+        tickets, page, workers = {}, 1, 8
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+            while page <= max_pages:
+                batches = list(pool.map(
+                    lambda p: self.get("/api/v1/tickets", {"page": p, "per_page": page_size}) or [],
+                    range(page, page + workers)))
+                for batch in batches:
+                    # By id: a ticket created mid-download shifts pages, and
+                    # would otherwise appear twice.
+                    tickets.update((t["id"], t) for t in batch)
+                if any(len(batch) < page_size for batch in batches):
+                    break
+                page += workers
+        tickets = list(tickets.values())
 
         if not tickets:  # search fallback, mirrors the original behaviour
             tickets = self.search("*", limit=1000)
@@ -613,12 +620,22 @@ class ZammadClient:
         _TICKET_CACHE.put(tickets)
         return tickets
 
-    def search(self, query: str, limit: int = 50) -> list:
+    def search(self, query: str, limit: int = 50, strict: bool = False,
+               page: int = None) -> list:
         """Full-text ticket search — used for human-raised tickets that carry
-        no Zabbix event id."""
+        no Zabbix event id.
+
+        strict raises instead of returning [], for a caller that would otherwise
+        read a failed search as "no tickets matched". page reads past the first
+        `limit` rows, which is the only way past SEARCH_CAP."""
+        params = {"query": query, "limit": limit}
+        if page:
+            params.update(page=page, per_page=limit)
         try:
-            data = self.get("/api/v1/tickets/search", {"query": query, "limit": limit})
+            data = self.get("/api/v1/tickets/search", params)
         except Exception:
+            if strict:
+                raise
             return []
         if isinstance(data, list):
             return data
@@ -637,6 +654,30 @@ class ZammadClient:
     # trusts the row count silently under-reports any tag with more tickets
     # than this, so the cap is named and checked rather than discovered.
     SEARCH_CAP = 200
+
+    def search_all(self, query: str, max_rows: int = 1000) -> Optional[list]:
+        """Every ticket matching a search, paged past SEARCH_CAP.
+
+        None when more than max_rows match: past that, paging search is slower
+        than the parallel estate download, which the caller should use instead.
+        Raises on failure, so an error never reads as "nothing matched".
+        """
+        # ponytail: max_rows is a timing crossover measured on this estate
+        # (search ~1.5s/200 rows vs ~14s for all 4,794); re-measure if either moves.
+        first = self.search(query, limit=self.SEARCH_CAP, strict=True, page=1)
+        if len(first) < self.SEARCH_CAP:
+            return first
+        data = self.get("/api/v1/tickets/search",
+                        {"query": query, "limit": 1, "with_total_count": "true"})
+        total = int((data or {}).get("total_count") or 0)
+        if total > max_rows:
+            return None
+        pages = range(2, -(-total // self.SEARCH_CAP) + 1)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as pool:
+            rest = pool.map(lambda p: self.search(query, limit=self.SEARCH_CAP,
+                                                  strict=True, page=p), pages)
+            found = {t["id"]: t for batch in [first, *rest] for t in batch}
+        return list(found.values())
 
     def tickets_by_tags(self, tags: list, limit: int = SEARCH_CAP) -> list:
         """Tickets carrying every tag given.

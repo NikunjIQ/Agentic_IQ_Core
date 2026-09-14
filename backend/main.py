@@ -79,7 +79,7 @@ def _explain_failure(error: Exception) -> str:
                 "explicitly usually helps.")
 
     if any(word in text.lower() for word in ("connection", "timeout", "unreachable", "refused")):
-        return (f"I could not reach one of the backing systems (Zabbix or Zammad). "
+        return (f"I could not reach one of the backing systems. "
                 f"Please check they are online. Details: {text[:200]}")
 
     return f"Something went wrong while answering: {type(error).__name__}: {text[:300]}"

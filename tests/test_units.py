@@ -1767,3 +1767,70 @@ def test_history_is_stripped_unless_a_period_is_asked_for():
     assert "history_minutes" not in cleaned and dropped
     kept, dropped = scrub(dict(args), "CPU on server02 over the last hour")
     assert kept.get("history_minutes") == 60 and not dropped
+
+
+def test_zammad_filtered_question_skips_the_estate_download(monkeypatch):
+    """"Tickets created today" paged all 4,794 tickets (36s, 5.7 MB) to find 0.
+    Filters go to Zammad's search; too many matches (None) or a failed search
+    must still fall back to the estate rather than undercount."""
+    from datetime import datetime
+    from tools import zammad_tool
+    from tools.zammad_tool import query_zammad, IST, _window
+
+    now = datetime.now(IST).isoformat()
+    calls = {"estate": 0, "queries": []}
+
+    class Fake:
+        SEARCH_CAP = 200
+        hits = []
+        def search_all(self, query):
+            calls["queries"].append(query)
+            if isinstance(self.hits, Exception):
+                raise self.hits
+            return self.hits
+        def all_tickets(self):
+            calls["estate"] += 1
+            return [{"id": 1, "created_at": now, "state_id": 1}]
+        def state_map(self): return {1: "open", 2: "closed"}
+        def __getattr__(self, name): return lambda *a, **k: []
+
+    monkeypatch.setattr(zammad_tool, "ZammadClient", Fake)
+
+    Fake.hits = []
+    result = query_zammad.invoke({"date_filter": "today", "state_filter": "open"})
+    assert calls["estate"] == 0 and "FILTERED RESULT: 0" in result["summary"]
+    assert 'state.name:"open"' in calls["queries"][-1] and " AND " in calls["queries"][-1]
+
+    Fake.hits = [{"id": 7, "created_at": now, "state_id": 1},
+                 {"id": 8, "created_at": now, "state_id": 2}]
+    result = query_zammad.invoke({"state_filter": "open"})
+    assert calls["estate"] == 0 and len(result["dataframe"]) == 1, "pandas re-check dropped"
+    assert "not the whole helpdesk" in result["summary"]
+    assert result["summary"].count("state in") == 2, "label once in scope, once in result"
+
+    Fake.hits = None
+    query_zammad.invoke({"date_filter": "today"})
+    assert calls["estate"] == 1, "too many matches must fall back to the estate"
+
+    Fake.hits = RuntimeError("search down")
+    result = query_zammad.invoke({"date_filter": "today"})
+    assert calls["estate"] == 2 and len(result["raw"]["result"]) == 1
+
+    # 00:10 IST is still the previous day in UTC; "today" must start at IST midnight.
+    start, end = _window("today", datetime(2026, 9, 14, 0, 10, tzinfo=IST))
+    assert start == datetime(2026, 9, 14, tzinfo=IST) and end is None
+
+
+def test_zammad_search_all_pages_past_the_cap():
+    """Search stops at 200 a page; paging reaches the rest, and past max_rows
+    the caller is told to use the estate instead."""
+    from tools.clients import ZammadClient
+
+    client = ZammadClient.__new__(ZammadClient)
+    rows = [{"id": i} for i in range(450)]
+    client.search = lambda q, limit, strict, page: rows[(page - 1) * 200:page * 200]
+    client.get = lambda path, params: {"total_count": len(rows)}
+    assert len(client.search_all("x")) == 450
+    assert client.search_all("x", max_rows=400) is None
+    rows = rows[:5]
+    assert len(client.search_all("x")) == 5

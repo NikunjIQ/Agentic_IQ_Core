@@ -5,6 +5,7 @@ from agent.tool_registry import TOOL_REGISTRY
 from agent.tool_schemas import TOOL_SCHEMAS
 from agent.metadata import fetch_live_metadata
 from agent.arg_guard import scrub
+from agent.history import recent_turns
 from agent import streaming, clarify, coverage
 from agent.voice import (CONVERSATIONAL_STYLE, CONVERSATIONAL_STYLE_BRIEF,
                          system_for_tools)
@@ -144,7 +145,7 @@ def _complex_path_node_impl(state: AgentState) -> AgentState:
         live_schema=live_schema, style=CONVERSATIONAL_STYLE_BRIEF)
 
     messages = [{"role": "system", "content": system_content}]
-    messages += state["conversation_history"]
+    messages += recent_turns(state.get("conversation_history"))
     messages.append({"role": "user", "content": state["question"]})
 
     tools_called = []

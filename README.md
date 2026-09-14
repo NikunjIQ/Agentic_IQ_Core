@@ -303,7 +303,13 @@ live in `backend/agent/models.py` and are env-overridable.
 
 **Zammad fetching is inefficient.** `query_zammad` downloads the whole ticket estate
 (~3,825 tickets) before filtering for most queries. Cached 60s; a cold answer takes
-~43s. `tag_filter` and `search` skip the download.
+~43s. Date, state, text and tag filters now run inside Zammad's own search,
+paged past its 200-row limit, so a filtered question takes 1–6s. Past 1,000
+matches (or if search fails) it downloads the estate instead, 8 pages at a
+time (~16s). Owner, priority, customer and organisation are still filtered in
+pandas: `priority.name` returned 0 with no error, so each field is pushed to
+the server only once `test_zammad_server_filters_match_the_estate` proves it.
+Dates are IST.
 
 **Silent truncation is the recurring hazard.** Zammad's search returns at most 200
 rows; Ceph's image listing returned 5 of 37 by default; OpenSearch stops counting at
