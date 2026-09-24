@@ -12,6 +12,7 @@ import pandas as pd
 from langchain_core.tools import tool
 
 from tools.zabbix.audit import query_audit
+from tools.zabbix.changes import query_changes
 from tools.zabbix.client import build_rpc
 from tools.zabbix.hosts import query_hostgroups, query_hosts
 from tools.zabbix.items import query_items
@@ -36,12 +37,13 @@ def query_zabbix(
     """
     Query Zabbix: Cisco routers/switches, Windows hosts, a few Linux boxes.
 
-    - query_type: 'hosts' (default) | 'hostgroups' | 'items' | 'problems' | 'alerts' | 'triggers' | 'audit' | 'sla'.
+    - query_type: 'hosts' (default) | 'hostgroups' | 'items' | 'problems' | 'alerts' | 'triggers' | 'audit' | 'changes' | 'sla'.
       'hosts' = counts and up/down status, including totals for routers and switches.
       'hostgroups' = only when the question is about the groups themselves.
       'items' = metric VALUES. 'problems' = what is wrong now. 'alerts' = notifications
-      that were sent. 'audit' = config changes. 'sla' = service-level targets and achieved figures.
-    - host_filter: one device by name or IP. Applies to hosts, items, problems, audit, sla.
+      that were sent. 'audit' = config changes. 'changes' = what was changed in the
+      24h before each live problem ("did someone touch it before it broke"). 'sla' = service-level targets and achieved figures.
+    - host_filter: one device by name or IP. Applies to hosts, items, problems, audit, changes, sla.
     - group_filter: a host group ('Routers', 'Switches'). Applies to hosts and items.
     - status_filter: for 'hosts', availability — accepts several at once ('up',
       'unreachable or unknown'); 'down' includes unreachable. For 'problems', a minimum
@@ -83,6 +85,8 @@ def query_zabbix(
             result = query_alerts(rpc, date_filter=date_filter)
         elif q_type == "triggers":
             result = query_triggers(rpc)
+        elif q_type == "changes":
+            result = query_changes(rpc, host_filter=host_filter, status_filter=status_filter)
         elif q_type == "audit":
             result = query_audit(rpc, host_filter=host_filter)
         elif q_type in ("sla", "slas", "sli", "services", "service"):

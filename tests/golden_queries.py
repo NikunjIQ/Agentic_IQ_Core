@@ -35,6 +35,7 @@ ZABBIX_QUERIES = [
                                  "host_filter": "192.168.1.74"}, "problems"),
     ("config change of a device", {"query_type": "audit",
                                    "host_filter": "192.168.1.80"}, "Configuration changes"),
+    ("changes before problems", {"query_type": "changes"}, "24 hours before each of"),
     # Asked from the start, answerable only since the metric vocabulary grew
     # beyond cpu/memory/traffic/disk. Uptime, OS version, model and serial come
     # from SNMP items, not from host inventory — inventory is disabled on every

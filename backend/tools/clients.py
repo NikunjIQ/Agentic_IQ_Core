@@ -6,6 +6,7 @@ correlation engine needs the same plumbing without going through the tool
 wrappers, so it lives here once.
 """
 
+import hashlib
 import os
 import time
 import concurrent.futures
@@ -438,7 +439,7 @@ class CephDaemonLogClient:
     HEARTBEAT = "system:0"      # 83% of the Ceph rows; carries no information
 
     def __init__(self):
-        _ensure_config()
+        _ensure_config("Ceph container logs")
         raw = cfg("OPENSEARCH2_URL", "https://192.168.1.152:9200").rstrip("/")
         if not raw.startswith("http"):
             raw = "https://" + raw
@@ -749,7 +750,10 @@ class ZammadClient:
 # short-lived JWT and offers no long-lived API key, so exactly one non-GET call
 # exists in this client: the login. There is deliberately no create, update or
 # delete method anywhere below, so nothing in the app can reach one.
-_CEPH_TOKEN = {"value": None, "expires_at": 0.0}
+# One token per credential set, never one for the process: each user logs in
+# with their own Ceph account, and a shared slot handed the first user's token
+# to everyone for its ~8h lifetime, whatever their own URL or password.
+_CEPH_TOKENS = {}
 
 # Endpoint versions are per-path and not guessable — /api/monitor answers at 1.0
 # while /api/osd/settings wants 0.1, and asking with the wrong one returns 415,
@@ -794,8 +798,10 @@ class CephClient:
         call keeps the login count to roughly three a day.
         """
         now = time.time()
-        if _CEPH_TOKEN["value"] and now < _CEPH_TOKEN["expires_at"] - 60:
-            return _CEPH_TOKEN["value"]
+        key = (self.url, self.user, hashlib.sha256(self.password.encode()).hexdigest())
+        token, expires_at = _CEPH_TOKENS.get(key, (None, 0.0))
+        if token and now < expires_at - 60:
+            return token
 
         # The one POST in the app, and it creates nothing — it exchanges
         # credentials for a token, so a second attempt is safe.
@@ -826,8 +832,7 @@ class CephClient:
         except Exception:
             pass
 
-        _CEPH_TOKEN["value"] = token
-        _CEPH_TOKEN["expires_at"] = expires
+        _CEPH_TOKENS[key] = (token, expires)
         return token
 
     def get(self, path: str, params: Optional[dict] = None, version: Optional[str] = None):

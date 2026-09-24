@@ -46,6 +46,7 @@ FIELD_GROUPS = [
         ("PROMETHEUS_URL", "URL", False, "http://192.168.1.29:9190"),
         ("PROMETHEUS_USER", "Username", False, ""),
         ("PROMETHEUS_PASS", "Password", True, ""),
+        ("PROMETHEUS_TOKEN", "API token (optional)", True, ""),
     ]),
     ("OpenSearch", "OpenStack application logs", [
         ("OPENSEARCH_URL", "URL", False, "http://192.168.1.32:9200"),
@@ -60,6 +61,16 @@ FIELD_GROUPS = [
         # Most dashboards run a self-signed certificate. Left as a field rather
         # than assumed, so a cluster with a real certificate can verify it.
         ("CEPH_VERIFY_TLS", "Verify TLS certificate (true/false)", False, "false"),
+    ]),
+    # A separate OpenSearch cluster holding what Ceph's containers print. Its
+    # own section, not part of Ceph: different host and credentials, and until
+    # it was listed here every user read it through the deployment's .env login.
+    ("Ceph container logs", "Ceph daemon stdout (second OpenSearch, HTTPS)", [
+        ("OPENSEARCH2_URL", "URL", False, "https://192.168.1.152:9200"),
+        ("OPENSEARCH2_CEPH_INDEX", "Index pattern", False, "podman-20*"),
+        ("OPENSEARCH2_USER", "Username", False, ""),
+        ("OPENSEARCH2_PASS", "Password", True, ""),
+        ("OPENSEARCH2_VERIFY_TLS", "Verify TLS certificate (true/false)", False, "false"),
     ]),
     ("Groq", "The AI model provider", [
         ("GROQ_API_KEY", "API key", True, ""),

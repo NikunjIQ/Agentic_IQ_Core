@@ -706,6 +706,7 @@ async function ask(question) {
       ui.source.appendChild(el("span", "source", src[1]));
     }
     renderPayload(payload, ui.extras);
+    if (payload.turn_id) ui.extras.appendChild(rateBar(payload.turn_id, null));
     state.payloads.push(payload);
     state.history.push({ role: "user", content: question });
     state.history.push({ role: "assistant", content: text || payload.final_answer || "" });
@@ -940,6 +941,35 @@ function ago(stamp) {
   return Math.round(s / 86400) + " d ago";
 }
 
+/* 👍 / 👎 on an answer. Clicking the lit one again does nothing: a rating can be
+   changed, not withdrawn, which keeps the server to one simple upsert. */
+function rateBar(turnId, rating) {
+  const bar = el("div", "rate");
+  const buttons = [[1, "👍", "Good answer"], [-1, "👎", "Wrong or unhelpful answer"]].map(
+    ([value, face, label]) => {
+      const b = el("button", "rate-btn", face);
+      b.type = "button";
+      b.setAttribute("aria-label", label);
+      b.setAttribute("aria-pressed", String(rating === value));
+      b.addEventListener("click", async () => {
+        try {
+          const res = await api("/feedback", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ turn_id: turnId, rating: value }),
+          });
+          if (!res.ok) return;
+        } catch (e) {
+          return;
+        }
+        for (const other of buttons) other.setAttribute("aria-pressed", String(other === b));
+      });
+      return b;
+    });
+  bar.append(...buttons);
+  return bar;
+}
+
 function markPin(button, on) {
   button.classList.toggle("on", on);
   button.setAttribute("aria-pressed", String(on));
@@ -1058,6 +1088,7 @@ function drawStoredTurn(t) {
     ui.source.appendChild(el("span", "source", src[1]));
   }
   renderPayload(p, ui.extras);
+  if (t.id) ui.extras.appendChild(rateBar(t.id, t.rating));
   ui.turn.classList.add("reveal", "in");
   state.payloads.push(p);
   // Restored so a follow-up ("and on server03?") still has its context.

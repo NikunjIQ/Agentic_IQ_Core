@@ -242,10 +242,11 @@ async def chat_stream(request: ChatRequest, user: dict = Depends(current_user)):
 
     def remember(payload):
         # Kept so the conversation can be reopened. Same rule as a charge: a
-        # failed write loses the history row, never the answer.
+        # failed write loses the history row, never the answer. The turn's id
+        # goes back to the page so the answer can be rated.
         try:
-            db.save_turn(user_id, conversation_id, request.question,
-                         payload.get("final_answer", ""), payload)
+            payload["turn_id"] = db.save_turn(user_id, conversation_id, request.question,
+                                              payload.get("final_answer", ""), payload)
         except Exception:
             pass
 
@@ -385,6 +386,21 @@ def delete_conversation(conversation_id: str, user: dict = Depends(current_user)
     return {"ok": True}
 
 
+class FeedbackRequest(BaseModel):
+    turn_id: int
+    rating: int
+
+
+@app.post("/feedback")
+def feedback(request: FeedbackRequest, user: dict = Depends(current_user)):
+    """👍 (1) or 👎 (-1) on one of the caller's own answers."""
+    if request.rating not in (-1, 1):
+        raise HTTPException(status_code=400, detail="Rating must be 1 or -1.")
+    if not db.set_feedback(user["id"], request.turn_id, request.rating):
+        raise HTTPException(status_code=404, detail="No such answer.")
+    return {"ok": True}
+
+
 class FavouriteRequest(BaseModel):
     question: str
 
@@ -409,6 +425,13 @@ def delete_favourite(favourite_id: int, user: dict = Depends(current_user)):
 
 
 # --------------------------------------------------------------------- admin
+
+@app.get("/admin/feedback")
+def admin_feedback(user: dict = Depends(admin_user)):
+    """Every thumbs-down, with the tools that answered it — candidates for
+    tests/routing_cases.py."""
+    return {"downvotes": db.list_downvotes()}
+
 
 class AllocationRequest(BaseModel):
     user_id: int

@@ -81,7 +81,7 @@ escalate to the larger one rather than failing the request.
 
 | Tool | What it answers |
 |---|---|
-| `query_zabbix` | hosts, host groups, items, problems, alerts, triggers, config audit, SLAs. Metrics cover CPU, memory, traffic, disk, uptime, OS/IOS version, agent version, hardware model/serial, ICMP latency and loss |
+| `query_zabbix` | hosts, host groups, items, problems, alerts, triggers, config audit, **what was changed in the 24h before each live problem** (people vs Zabbix's own template churn; hosts with no audit trail are named, not read as "nothing changed"), SLAs. Metrics cover CPU, memory, traffic, disk, uptime, OS/IOS version, agent version, hardware model/serial, ICMP latency and loss |
 | `query_prometheus` | CPU/memory/disk/load/uptime/network — now, or as a trend over time (`history_minutes`, up to 24h) — scrape targets, VMs, OpenStack routers & networks, Cinder volumes, containers, raw PromQL, metric search |
 | `query_opensearch` | OpenStack logs by date, text, level, service, host, tenant; breakdowns |
 | `query_ceph` | health, capacity (raw **and** usable after replication), pools, OSDs, hosts, RBD images, snapshots, CephFS/MDS, CRUSH rules and hierarchy, cluster logs, monitoring endpoints |
@@ -153,6 +153,8 @@ without the key.
 **Each user's systems.** On **Connections**, each user enters the systems *they*
 use. A section left empty stays disconnected, and a question about that system says
 so rather than borrowing anyone else's credentials. **Test** checks before **Save**.
+That includes the Ceph container-log cluster (its own section) and the optional
+Prometheus API token — neither is read from `.env` for a signed-in user.
 
 **System settings.** The Groq key belongs to the deployment, not to a user: an admin
 sets it on Connections, or put it in `backend/.env` (`cp backend/.env.example
@@ -218,6 +220,8 @@ on a private LAN).
 - **History drawer.** Every answered question is saved per account. Reopen a
   conversation (tables and charts redraw, follow-ups keep context) or delete it.
   **Pinned** questions (star beside "Asked") re-run in one click.
+- **👍/👎 on every answer.** Stored per turn; admins list the thumbs-down at
+  `/admin/feedback`, the source for new cases in `tests/routing_cases.py`.
 - **Spend meter.** Total spent against a ₹10,000 ceiling. Representational only — never blocks.
 - **Connections** page for each user's own credentials; **Users** page (admins) to allocate credit.
 

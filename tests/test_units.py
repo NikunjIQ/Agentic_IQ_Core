@@ -692,9 +692,10 @@ def test_config_save_clears_every_cache():
 def test_config_field_groups_cover_every_system():
     from agent import config_store
     systems = {group[0] for group in config_store.FIELD_GROUPS}
-    assert systems == {"Zabbix", "Zammad", "Prometheus", "OpenSearch", "Ceph", "Groq"}
-    for key in ("ZABBIX_API_TOKEN", "ZAMMAD_PASS", "PROMETHEUS_PASS",
-                "OPENSEARCH_PASS", "CEPH_PASS", "GROQ_API_KEY"):
+    assert systems == {"Zabbix", "Zammad", "Prometheus", "OpenSearch", "Ceph",
+                       "Ceph container logs", "Groq"}
+    for key in ("ZABBIX_API_TOKEN", "ZAMMAD_PASS", "PROMETHEUS_PASS", "PROMETHEUS_TOKEN",
+                "OPENSEARCH_PASS", "CEPH_PASS", "OPENSEARCH2_PASS", "GROQ_API_KEY"):
         assert key in config_store.SECRET_KEYS, f"{key} must be treated as a secret"
 
     # A system reachable by a tool but absent from the form can only be
@@ -1834,3 +1835,128 @@ def test_zammad_search_all_pages_past_the_cap():
     assert client.search_all("x", max_rows=400) is None
     rows = rows[:5]
     assert len(client.search_all("x")) == 5
+
+
+def test_ceph_token_is_never_shared_across_credentials(monkeypatch):
+    """One global token handed the first user's Ceph login to everyone for ~8h."""
+    from tools import clients
+
+    logins = []
+
+    class Response:
+        status_code = 200
+        text = ""
+        def __init__(self, user): self.user = user
+        def json(self): return {"token": f"token-for-{self.user}"}
+
+    def fake_request(method, url, **kwargs):
+        logins.append(kwargs["json"]["username"])
+        return Response(kwargs["json"]["username"])
+
+    monkeypatch.setattr(clients, "request", fake_request)
+    monkeypatch.setattr(clients, "_CEPH_TOKENS", {})
+
+    def client(user, password):
+        c = clients.CephClient.__new__(clients.CephClient)
+        c.url, c.user, c.password, c.verify = "https://ceph", user, password, False
+        return c
+
+    assert client("alice", "a-pass")._token() == "token-for-alice"
+    assert client("bob", "b-pass")._token() == "token-for-bob"
+    assert client("alice", "a-pass")._token() == "token-for-alice"
+    assert logins == ["alice", "bob"], "same credentials reuse one login, others get their own"
+    client("alice", "wrong")._token()
+    assert logins[-1] == "alice" and len(logins) == 3, "a different password is a different login"
+
+
+def test_deployment_credentials_never_reach_a_signed_in_user(monkeypatch):
+    """PROMETHEUS_TOKEN and the Ceph container-log cluster used to come from .env
+    for every user."""
+    from agent import auth_store, config_store
+    from tools.clients import CephDaemonLogClient
+    monkeypatch.setenv("PROMETHEUS_TOKEN", "deployment-token")
+    monkeypatch.setenv("OPENSEARCH2_URL", "https://shared-cluster:9200")
+    with _fresh_db() as (db, _):
+        a = auth_store.signup("alice", "secret123", "a@example.com")["user_id"]
+        config_store.user_save(a, {"PROMETHEUS_URL": "http://prom-a",
+                                   "PROMETHEUS_TOKEN": "alice-token", "CEPH_URL": "https://ceph-a"})
+        try:
+            config_store.use_user(a)
+            assert config_store.get("PROMETHEUS_TOKEN") == "alice-token"
+            with pytest.raises(config_store.NotConnected):
+                CephDaemonLogClient()
+        finally:
+            config_store.use_user(None)
+
+
+def test_feedback_is_per_user_and_updates_in_place():
+    from fastapi.testclient import TestClient
+    import main
+    with _fresh_db() as (db, _):
+        alice, bob = TestClient(main.app), TestClient(main.app)
+        alice.post("/auth/signup", json={"username": "alice", "password": "secret123",
+                                         "email": "a@example.com"})
+        bob.post("/auth/signup", json={"username": "bob", "password": "secret456",
+                                       "email": "b@example.com"})
+        a = db.find_user("alice")["id"]
+        cid = db.new_conversation_id()
+        turn = db.save_turn(a, cid, "how many hosts", "11", {"tools_called": ["query_zabbix"]})
+
+        assert bob.post("/feedback", json={"turn_id": turn, "rating": -1}).status_code == 404
+        assert alice.post("/feedback", json={"turn_id": turn, "rating": 2}).status_code == 400
+        assert alice.post("/feedback", json={"turn_id": turn, "rating": 1}).status_code == 200
+        assert alice.post("/feedback", json={"turn_id": turn, "rating": -1}).status_code == 200
+        assert db.load_conversation(a, cid)[0]["rating"] == -1, "re-rating updates in place"
+        assert alice.get("/admin/feedback").json()["downvotes"][0]["tools_called"] == ["query_zabbix"]
+        assert bob.get("/admin/feedback").status_code == 403
+
+        db.delete_conversation(a, cid)
+        with db.tx() as c:
+            assert c.execute("SELECT COUNT(*) FROM feedback").fetchone()[0] == 0
+
+
+def test_changes_before_problems_splits_people_from_zabbix_and_admits_blind_spots():
+    """A person's change inside the 24h before a problem is the finding; Zabbix's
+    own churn is counted, not listed; a host with no audit trail is 'cannot rule
+    out', never 'nothing changed'."""
+    from tools.zabbix.changes import query_changes
+
+    T = 1_800_000_000
+    audit = {"10": [
+        {"resourceid": "10", "resourcetype": "4", "action": "1", "clock": str(T - 600),
+         "username": "Admin", "resourcename": "r1"},
+        {"resourceid": "10", "resourcetype": "4", "action": "1", "clock": str(T - 1200),
+         "username": "System", "resourcename": "r1"},
+        {"resourceid": "10", "resourcetype": "4", "action": "1", "clock": str(T - 3 * 86400),
+         "username": "Admin", "resourcename": "r1"},
+    ], "20": []}
+    hosts = {"r1": "10", "r2": "20"}
+
+    def rpc(method, params):
+        if method == "problem.get":
+            return [{"eventid": "1", "objectid": "t1", "clock": str(T), "name": "down",
+                     "severity": "4", "tags": []},
+                    {"eventid": "2", "objectid": "t2", "clock": str(T), "name": "slow",
+                     "severity": "2", "tags": []}]
+        if method == "trigger.get" and "triggerids" in params:
+            return [{"triggerid": "t1", "hosts": [{"name": "r1"}]},
+                    {"triggerid": "t2", "hosts": [{"name": "r2"}]}]
+        if method == "host.get":
+            name = params["search"]["name"]
+            return [{"hostid": hosts[name], "host": name, "name": name}]
+        if method in ("item.get", "trigger.get"):
+            return []
+        if method == "auditlog.get":
+            rid = params["filter"]["resourceid"][0]
+            rows = [e for e in audit[rid]
+                    if params.get("time_from", 0) <= int(e["clock"]) <= params.get("time_till", 10**12)]
+            return [dict(e) for e in rows][:params["limit"]]
+        raise AssertionError(method)
+
+    result = query_changes(rpc)
+    df, summary = result["dataframe"], result["summary"]
+    assert list(df["by"]) == ["Admin", "System"], "the 3-day-old change is outside the window"
+    assert df.iloc[0]["minutes_before"] == 10
+    assert df.iloc[1]["change"] == "1 automatic change(s)"
+    assert "BY A PERSON" in summary
+    assert "No audit trail exists at all for r2" in summary and "cannot be ruled out" in summary

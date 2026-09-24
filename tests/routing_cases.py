@@ -74,6 +74,11 @@ ZABBIX_ROUTING = [
      "query_zabbix", "simple"),
     ("Tell me the problem with 192.168.1.73", "query_zabbix", "simple"),
     ("When was the config of 192.168.1.74 changed?", "query_zabbix", "simple"),
+    # "What changed before it broke": the literal ask, and a paraphrase that
+    # shares none of its words (HANDOVER §5: a routing fix is only done when a
+    # paraphrase routes too).
+    ("What changed on 192.168.1.73 before its problems started?", "query_zabbix", "simple"),
+    ("Did anyone touch the router shortly before it went down?", "query_zabbix", "simple"),
 ]
 
 ZAMMAD_ROUTING = [

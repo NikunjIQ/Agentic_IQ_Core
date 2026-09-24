@@ -61,6 +61,7 @@ SURFACE = {
         "alerts": ("alerts",),
         "triggers": ("triggers",),
         "audit": ("config audit", "config changes"),
+        "changes": ("changed before",),
         "sla": ("SLAs", "service levels"),
     },
     "query_zammad": {

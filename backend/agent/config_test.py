@@ -133,7 +133,7 @@ def test_prometheus(cfg: dict) -> dict:
         return _fail(_describe(exc))
 
 
-def test_opensearch(cfg: dict) -> dict:
+def test_opensearch(cfg: dict, verify: bool = True) -> dict:
     url = str(cfg.get("OPENSEARCH_URL", "")).strip().rstrip("/")
     if not url:
         return _fail("no URL set")
@@ -142,7 +142,7 @@ def test_opensearch(cfg: dict) -> dict:
     auth = HTTPBasicAuth(user, str(cfg.get("OPENSEARCH_PASS", "")).strip()) if user else None
 
     try:
-        res = requests.get(url, auth=auth, timeout=TIMEOUT)
+        res = requests.get(url, auth=auth, timeout=TIMEOUT, verify=verify)
         if res.status_code in (401, 403):
             return _fail("reachable, but the credentials were rejected")
         res.raise_for_status()
@@ -151,7 +151,7 @@ def test_opensearch(cfg: dict) -> dict:
 
         # Reaching the cluster is not enough — the index pattern has to match
         # something, or every log question comes back empty.
-        count = requests.post(f"{url}/{index}/_count", auth=auth, timeout=TIMEOUT,
+        count = requests.post(f"{url}/{index}/_count", auth=auth, timeout=TIMEOUT, verify=verify,
                               json={"query": {"match_all": {}}})
         if count.status_code == 404:
             return _fail(f"{name} reachable, but no index matches '{index}'")
@@ -162,6 +162,17 @@ def test_opensearch(cfg: dict) -> dict:
                    f"{total:,} documents in '{index}'")
     except Exception as exc:
         return _fail(_describe(exc))
+
+
+def test_ceph_logs(cfg: dict) -> dict:
+    """The Ceph container-log cluster is OpenSearch too, only HTTPS and usually
+    self-signed, so it is the same check under its own keys."""
+    return test_opensearch(
+        {"OPENSEARCH_URL": cfg.get("OPENSEARCH2_URL", ""),
+         "OPENSEARCH_INDEX": cfg.get("OPENSEARCH2_CEPH_INDEX") or "podman-20*",
+         "OPENSEARCH_USER": cfg.get("OPENSEARCH2_USER", ""),
+         "OPENSEARCH_PASS": cfg.get("OPENSEARCH2_PASS", "")},
+        verify=str(cfg.get("OPENSEARCH2_VERIFY_TLS", "false")).lower() in ("1", "true", "yes"))
 
 
 def test_ceph(cfg: dict) -> dict:
@@ -248,6 +259,7 @@ TESTS = {
     "Zammad": test_zammad,
     "Prometheus": test_prometheus,
     "Ceph": test_ceph,
+    "Ceph container logs": test_ceph_logs,
     "OpenSearch": test_opensearch,
     "Groq": test_groq,
 }

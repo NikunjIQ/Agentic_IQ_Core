@@ -109,6 +109,13 @@ CREATE TABLE IF NOT EXISTS favourites (
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   UNIQUE (user_id, question)
 );
+
+CREATE TABLE IF NOT EXISTS feedback (
+  turn_id    INTEGER PRIMARY KEY REFERENCES turns(id) ON DELETE CASCADE,
+  user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  rating     INTEGER NOT NULL CHECK (rating IN (-1, 1)),
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 """
 
 
@@ -405,12 +412,12 @@ def new_conversation_id() -> str:
 
 
 def save_turn(user_id: int, conversation_id: str, question: str, answer: str,
-              payload: dict) -> None:
+              payload: dict) -> int:
     with tx() as c:
-        c.execute("INSERT INTO turns (user_id, conversation_id, question, answer, payload) "
+        return c.execute("INSERT INTO turns (user_id, conversation_id, question, answer, payload) "
                   "VALUES (?, ?, ?, ?, ?)",
                   (user_id, conversation_id, question, answer or "",
-                   json.dumps(_trim(payload), default=str)))
+                   json.dumps(_trim(payload), default=str))).lastrowid
 
 
 def list_conversations(user_id: int, limit: int = 50) -> list:
@@ -433,11 +440,13 @@ def load_conversation(user_id: int, conversation_id: str) -> list:
     """The turns, oldest first. Empty for an id that is not this user's — which
     is indistinguishable from one that does not exist, on purpose."""
     with tx() as c:
-        rows = c.execute("SELECT question, answer, payload, created_at FROM turns "
-                         "WHERE user_id = ? AND conversation_id = ? ORDER BY id",
+        rows = c.execute("SELECT t.id, t.question, t.answer, t.payload, t.created_at, "
+                         "f.rating FROM turns t LEFT JOIN feedback f ON f.turn_id = t.id "
+                         "WHERE t.user_id = ? AND t.conversation_id = ? ORDER BY t.id",
                          (user_id, conversation_id)).fetchall()
-    return [{"question": r["question"], "answer": r["answer"],
-             "payload": json.loads(r["payload"]), "created_at": r["created_at"]}
+    return [{"id": r["id"], "question": r["question"], "answer": r["answer"],
+             "payload": json.loads(r["payload"]), "created_at": r["created_at"],
+             "rating": r["rating"]}
             for r in rows]
 
 
@@ -471,3 +480,32 @@ def delete_favourite(user_id: int, favourite_id: int) -> bool:
     with tx() as c:
         return c.execute("DELETE FROM favourites WHERE id = ? AND user_id = ?",
                          (favourite_id, user_id)).rowcount > 0
+
+
+# ------------------------------------------------------------------ feedback
+# One rating per answer, changeable. A thumbs-down is the cheapest signal there
+# is that routing or an answer went wrong, and each one is a candidate case for
+# tests/routing_cases.py.
+
+def set_feedback(user_id: int, turn_id: int, rating: int) -> bool:
+    """Rate one of this user's own answers. False for anyone else's turn."""
+    with tx() as c:
+        return c.execute(
+            """INSERT INTO feedback (turn_id, user_id, rating)
+               SELECT id, user_id, ? FROM turns WHERE id = ? AND user_id = ?
+               ON CONFLICT (turn_id) DO UPDATE SET rating = excluded.rating,
+                                                  created_at = CURRENT_TIMESTAMP""",
+            (rating, turn_id, user_id)).rowcount > 0
+
+
+def list_downvotes(limit: int = 200) -> list:
+    """Every thumbs-down, newest first, with the tools that answered it."""
+    with tx() as c:
+        rows = c.execute(
+            """SELECT f.created_at, u.username, t.question, t.answer, t.payload
+               FROM feedback f JOIN turns t ON t.id = f.turn_id JOIN users u ON u.id = f.user_id
+               WHERE f.rating = -1 ORDER BY f.created_at DESC LIMIT ?""", (limit,)).fetchall()
+    return [{"created_at": r["created_at"], "username": r["username"],
+             "question": r["question"], "answer": r["answer"],
+             "tools_called": json.loads(r["payload"]).get("tools_called") or []}
+            for r in rows]

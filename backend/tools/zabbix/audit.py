@@ -14,30 +14,24 @@ AUDIT_ACTIONS = {
 }
 
 
-def query_audit(rpc, host_filter=None) -> dict:
-    if not host_filter:
-        return {"summary": "Please specify a host_filter (device) to check config changes.",
-                "dataframe": pd.DataFrame(), "raw": {}}
+def resolve_resources(rpc, host_filter):
+    """(matching hosts, {resource id: audit resource type}) for one device, or
+    ([], {}) when no host matches.
 
-    # Resolve the device first. The audit log is dominated by automatic
-    # item/trigger edits, so scanning "the last 100 entries" and grepping for a
-    # hostname finds nothing — host changes are older than the background churn
-    # and are keyed by hostid, not by name.
+    Resolve the device first. The audit log is dominated by automatic
+    item/trigger edits, so scanning "the last 100 entries" and grepping for a
+    hostname finds nothing — host changes are older than the background churn
+    and are keyed by hostid, not by name.
+    """
     matched_hosts = rpc("host.get", {
         "output": ["hostid", "host", "name"],
         "search": {"name": host_filter, "host": host_filter},
         "searchByAny": True,
     })
     if not matched_hosts:
-        return {"summary": f"Could not find a host matching '{host_filter}'.",
-                "dataframe": pd.DataFrame(), "raw": {}}
+        return [], {}
 
-    target = matched_hosts[0]
     host_ids = {str(h["hostid"]) for h in matched_hosts}
-
-    # Ask the audit log for this device's records by id. Sorting the whole log by
-    # time and taking the newest N never reaches them — background item/trigger
-    # edits generate far more entries than host changes do.
     expected_type = {rid: "4" for rid in host_ids}
     try:
         for item in rpc("item.get", {"output": ["itemid"],
@@ -48,16 +42,31 @@ def query_audit(rpc, host_filter=None) -> dict:
             expected_type[str(trig["triggerid"])] = "13"
     except Exception:
         pass  # host-level history alone still answers the question
+    return matched_hosts, expected_type
 
-    logs = rpc("auditlog.get", {
+
+def audit_entries(rpc, expected_type, time_from=None, time_till=None, limit=500) -> list:
+    """This device's audit records, newest first, labelled.
+
+    Asked for by id. Sorting the whole log by time and taking the newest N never
+    reaches them — background item/trigger edits generate far more entries than
+    host changes do. time_from/time_till (epoch seconds) ask for one window;
+    without them the newest `limit` rows are all there is, which on a router is
+    about a day.
+    """
+    params = {
         "output": "extend",
         "filter": {"resourceid": sorted(expected_type)},
         "sortfield": "clock", "sortorder": "DESC",
-        "limit": 500,
-    })
+        "limit": limit,
+    }
+    if time_from is not None:
+        params["time_from"] = int(time_from)
+    if time_till is not None:
+        params["time_till"] = int(time_till)
 
     relevant = []
-    for entry in logs:
+    for entry in rpc("auditlog.get", params):
         rid = str(entry.get("resourceid"))
         # ids are only unique within a resource type, so confirm the pair
         if expected_type.get(rid) != str(entry.get("resourcetype")):
@@ -66,6 +75,21 @@ def query_audit(rpc, host_filter=None) -> dict:
         entry["change"] = AUDIT_ACTIONS.get(int(entry.get("action", -1)), entry.get("action"))
         entry["details"] = str(entry.get("details"))[:200]
         relevant.append(entry)
+    return relevant
+
+
+def query_audit(rpc, host_filter=None) -> dict:
+    if not host_filter:
+        return {"summary": "Please specify a host_filter (device) to check config changes.",
+                "dataframe": pd.DataFrame(), "raw": {}}
+
+    matched_hosts, expected_type = resolve_resources(rpc, host_filter)
+    if not matched_hosts:
+        return {"summary": f"Could not find a host matching '{host_filter}'.",
+                "dataframe": pd.DataFrame(), "raw": {}}
+
+    target = matched_hosts[0]
+    relevant = audit_entries(rpc, expected_type)
 
     df = pd.DataFrame(relevant)
     label = target.get("name") or host_filter

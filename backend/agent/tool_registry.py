@@ -37,6 +37,7 @@ ROUTING_SUMMARIES = {
         "Windows hosts, a few Linux boxes. Host counts and up/down status, host "
         "groups, live problems, alerts, triggers, device metrics (CPU, memory, "
         "traffic, disk, uptime, OS/IOS version, model, serial), config audit, "
+        "what was changed before a device's problem started, "
         "SLAs and service levels."
     ),
     "query_zammad": (
