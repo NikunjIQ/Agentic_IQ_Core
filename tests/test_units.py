@@ -2046,6 +2046,23 @@ def test_ticket_assist_writes_one_marked_note():
     assert len(client.writes) == 2
 
 
+def test_ticket_assist_waits_out_a_new_tickets_first_minutes():
+    """Triggers nobody here owns fire on any change to a ticket under a minute old."""
+    import time
+    from datetime import datetime, timedelta, timezone
+    from agent import ticket_assist
+    slept, original = [], time.sleep
+    time.sleep = slept.append
+    try:
+        now = datetime.now(timezone.utc)
+        ticket_assist._wait_until_settled({"created_at": now.isoformat().replace("+00:00", "Z")})
+        ticket_assist._wait_until_settled({"created_at": (now - timedelta(hours=1)).isoformat()})
+        ticket_assist._wait_until_settled({})
+    finally:
+        time.sleep = original
+    assert len(slept) == 1 and 80 < slept[0] <= 90, slept
+
+
 def test_ticket_assist_skips_what_it_should_not_touch():
     """A person's ticket, and one that already carries a suggestion."""
     from agent import ticket_assist

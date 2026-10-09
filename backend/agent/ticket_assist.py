@@ -85,6 +85,24 @@ def signature_ok(raw_body: bytes, header: str) -> bool:
     return hmac.compare_digest(header.split("=", 1)[-1].strip().lower(), expected)
 
 
+def _wait_until_settled(ticket: dict) -> None:
+    """Hold the write until the ticket is past its first minutes.
+
+    This Zammad has triggers of unknown ownership that fire on anything
+    happening to a ticket "created within the last minute", so a note added
+    seconds after creation would re-send their "ticket created" emails.
+    Waiting costs nothing and avoids editing triggers nobody here owns.
+    """
+    try:
+        delay = max(0, int(os.getenv("TICKET_ASSIST_WRITE_DELAY", "90")))
+        created = datetime.fromisoformat(str(ticket.get("created_at", "")).replace("Z", "+00:00"))
+    except ValueError:
+        return
+    remaining = delay - (datetime.now(timezone.utc) - created).total_seconds()
+    if remaining > 0:
+        time.sleep(remaining)
+
+
 def _daily_limit() -> int:
     try:
         return max(0, int(os.getenv("TICKET_ASSIST_DAILY_LIMIT", "40")))
@@ -175,6 +193,7 @@ def _process(ticket_id: int, client, current_mode: str) -> dict:
     # Tag before note: if the second call fails the ticket is marked and has no
     # note, which is logged and harmless. The other order could leave a note
     # with no mark, and the next delivery would add a second one.
+    _wait_until_settled(ticket)
     client.add_tag(ticket_id, TAG)
     client.add_note(ticket_id, note)
     return {**found, "outcome": "written"}
