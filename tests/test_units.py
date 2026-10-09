@@ -1960,3 +1960,169 @@ def test_changes_before_problems_splits_people_from_zabbix_and_admits_blind_spot
     assert df.iloc[1]["change"] == "1 automatic change(s)"
     assert "BY A PERSON" in summary
     assert "No audit trail exists at all for r2" in summary and "cannot be ruled out" in summary
+
+
+# --- ticket assist: the only write this app makes ----------------------------
+_ZABBIX_BODY = ("Problem started at 10:45:28 on 2026.09.21 \n"
+                "Problem name: Linux: Nikunj VM has been restarted (uptime < 10m) \n"
+                "Host: Nikunj VM \nSeverity: Warning \nOperational data: 00:02:26 \n"
+                "Original problem ID: 3064125 \n"
+                "http://192.168.1.180/zabbix.php/tr_events.php?triggerid=32864&eventid=3064125")
+
+
+class _FakeZammad:
+    """Stands in for ZammadClient and records every write."""
+
+    def __init__(self, body=_ZABBIX_BODY, tags=()):
+        self.body, self.tags, self.writes = body, list(tags), []
+
+    def ticket(self, ticket_id):
+        return {"id": ticket_id, "number": "905345"}
+
+    def articles(self, ticket_id):
+        return [{"body": self.body}]
+
+    def ticket_tags(self, ticket_id):
+        return self.tags
+
+    def add_tag(self, ticket_id, tag):
+        self.writes.append(("tag", ticket_id, tag))
+
+    def add_note(self, ticket_id, body):
+        self.writes.append(("note", ticket_id, body))
+
+
+def _assist(mode, client, ticket_id=5447, **env):
+    """Run ticket_assist.handle with the model and the log file faked out."""
+    import os
+    import tempfile
+    from pathlib import Path
+    from agent import ticket_assist
+    settings = {"TICKET_ASSIST_MODE": mode, **env}
+    saved = {key: os.environ.get(key) for key in settings}
+    original_fix, original_log = ticket_assist.suggest_fix, ticket_assist.LOG_PATH
+    os.environ.update(settings)
+    ticket_assist.suggest_fix = lambda parsed, body: "- check the uptime"
+    with tempfile.TemporaryDirectory() as folder:
+        ticket_assist.LOG_PATH = Path(folder) / "log.jsonl"
+        try:
+            return ticket_assist.handle(ticket_id, client)
+        finally:
+            ticket_assist.suggest_fix, ticket_assist.LOG_PATH = original_fix, original_log
+            for key, value in saved.items():
+                os.environ.pop(key, None) if value is None else os.environ.update({key: value})
+
+
+def test_ticket_assist_is_off_unless_switched_on():
+    """It ships disabled: a webhook arriving before anyone opted in does nothing."""
+    from agent import ticket_assist
+    ticket_assist._reset()
+    client = _FakeZammad()
+    for mode in ("off", "", "WRITE-ISH"):
+        assert _assist(mode, client)["outcome"] == "skipped"
+    assert client.writes == []
+
+
+def test_ticket_assist_dry_run_never_writes():
+    from agent import ticket_assist
+    ticket_assist._reset()
+    client = _FakeZammad()
+    record = _assist("dry_run", client)
+    assert record["outcome"] == "dry_run" and "- check the uptime" in record["suggestion"]
+    assert record["suggestion"].startswith(ticket_assist.HEADER)
+    assert client.writes == [], "dry run must not touch Zammad"
+
+
+def test_ticket_assist_writes_one_marked_note():
+    from agent import ticket_assist
+    ticket_assist._reset()
+    client = _FakeZammad()
+    assert _assist("write", client)["outcome"] == "written"
+    assert [w[0] for w in client.writes] == ["tag", "note"], (
+        "tag first: a failed second call must leave a mark, never an unmarked note")
+    assert client.writes[0][2] == ticket_assist.TAG
+    # Zammad delivering the same ticket twice must not produce a second note.
+    assert _assist("write", client)["outcome"] == "skipped"
+    assert len(client.writes) == 2
+
+
+def test_ticket_assist_skips_what_it_should_not_touch():
+    """A person's ticket, and one that already carries a suggestion."""
+    from agent import ticket_assist
+    for client, reason in ((_FakeZammad(body="Need a new laptop before October"), "not a Zabbix"),
+                           (_FakeZammad(tags=[ticket_assist.TAG]), "already has")):
+        ticket_assist._reset()
+        record = _assist("write", client)
+        assert record["outcome"] == "skipped" and reason in record["reason"], record
+        assert client.writes == []
+
+
+def test_ticket_assist_stops_at_the_daily_limit():
+    """An alert storm raised 67 tickets in a day against a per-minute token cap."""
+    from agent import ticket_assist
+    ticket_assist._reset()
+    client = _FakeZammad()
+    outcomes = [_assist("write", client, ticket_id=n, TICKET_ASSIST_DAILY_LIMIT="2")["outcome"]
+                for n in (1, 2, 3)]
+    assert outcomes == ["written", "written", "skipped"]
+
+
+def test_ticket_assist_records_a_failure_instead_of_raising():
+    """It runs as a background task, where an exception would vanish."""
+    from agent import ticket_assist
+    ticket_assist._reset()
+
+    class _Broken(_FakeZammad):
+        def add_note(self, ticket_id, body):
+            raise RuntimeError("ZAMMAD_WRITE_TOKEN is not set")
+
+    record = _assist("write", _Broken())
+    assert record["outcome"] == "error" and "ZAMMAD_WRITE_TOKEN" in record["error"]
+
+
+def test_webhook_signature_is_required():
+    """The API has no other authentication, and this call spends tokens and writes."""
+    import os
+    import hmac
+    import hashlib
+    from agent import ticket_assist
+    body = b'{"ticket": {"id": 5447}}'
+    saved = os.environ.get("ZAMMAD_WEBHOOK_SECRET")
+    try:
+        os.environ.pop("ZAMMAD_WEBHOOK_SECRET", None)
+        assert not ticket_assist.signature_ok(body, "sha1=anything"), "no secret means refuse"
+        os.environ["ZAMMAD_WEBHOOK_SECRET"] = "s3cret"
+        good = hmac.new(b"s3cret", body, hashlib.sha1).hexdigest()
+        assert ticket_assist.signature_ok(body, f"sha1={good}")
+        assert ticket_assist.signature_ok(body, good)
+        assert not ticket_assist.signature_ok(body, "")
+        assert not ticket_assist.signature_ok(body, "sha1=" + "0" * 40)
+        assert not ticket_assist.signature_ok(body + b" ", f"sha1={good}"), "a changed body must fail"
+    finally:
+        os.environ.pop("ZAMMAD_WEBHOOK_SECRET", None) if saved is None else os.environ.update(
+            {"ZAMMAD_WEBHOOK_SECRET": saved})
+
+
+def test_zammad_writes_use_their_own_token_and_are_never_retried():
+    """A note POST that times out may already be stored; sending it again posts it twice."""
+    import os
+    import requests
+    from tools import clients
+    saved = os.environ.get("ZAMMAD_WRITE_TOKEN")
+    try:
+        os.environ.pop("ZAMMAD_WRITE_TOKEN", None)
+        try:
+            clients.ZammadClient(service_token="t").add_note(1, "x")
+            assert False, "writing without ZAMMAD_WRITE_TOKEN must refuse"
+        except RuntimeError:
+            pass
+        os.environ["ZAMMAD_WRITE_TOKEN"] = "write-token"
+        fake = _Flaky(requests.exceptions.ReadTimeout("slow"), failures=99)
+        try:
+            _with_fake(fake, lambda: clients.ZammadClient(service_token="t").add_note(1, "x"))
+        except requests.exceptions.ReadTimeout:
+            pass
+        assert fake.calls == 1, f"a write must be sent once, got {fake.calls} attempts"
+    finally:
+        os.environ.pop("ZAMMAD_WRITE_TOKEN", None) if saved is None else os.environ.update(
+            {"ZAMMAD_WRITE_TOKEN": saved})

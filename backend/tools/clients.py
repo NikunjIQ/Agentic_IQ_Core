@@ -60,7 +60,7 @@ _WORTH_RETRYING = (requests.exceptions.Timeout,
                    requests.exceptions.ConnectionError)
 
 
-def request(method: str, url: str, *, system: str = "", **kwargs):
+def request(method: str, url: str, *, system: str = "", retry: bool = True, **kwargs):
     """One HTTP request, tried again if the connection was the problem.
 
     Ceph's image listing answered the same call in 45 seconds (timed out), then
@@ -80,8 +80,11 @@ def request(method: str, url: str, *, system: str = "", **kwargs):
     all fall through untouched. 429 especially: the models are capped per minute
     AND per day, and retrying a rate limit spends the remainder faster while
     never succeeding.
+
+    retry=False is for writes. A POST that times out may already have been
+    stored, and sending it again would create the thing twice.
     """
-    attempts = _retry_budget() + 1
+    attempts = (_retry_budget() if retry else 0) + 1
     last = None
     for attempt in range(attempts):
         try:
@@ -498,7 +501,16 @@ class CephDaemonLogClient:
 # Zammad
 # ---------------------------------------------------------------------------
 class ZammadClient:
-    def __init__(self):
+    def __init__(self, service_token: str = None):
+        # service_token: act as one fixed Zammad identity instead of the signed-in
+        # user. Ticket assist runs from a webhook with nobody signed in, so it has
+        # no account whose credentials it could borrow — and should not borrow any.
+        if service_token:
+            _ensure_config()
+            self.url = os.getenv("ZAMMAD_URL", "http://192.168.1.205:8082").rstrip("/")
+            self.headers = {"Authorization": f"Token token={service_token}"}
+            self.auth = None
+            return
         _ensure_config("Zammad")
         self.url = cfg("ZAMMAD_URL", "http://192.168.1.205:8082").rstrip("/")
         self.headers = {}
@@ -544,6 +556,30 @@ class ZammadClient:
             return self.get(f"/api/v1/ticket_articles/by_ticket/{ticket_id}") or []
         except Exception:
             return []
+
+    # ---- writes ------------------------------------------------------------
+    # The only writes this app makes to any system. They use their own token so
+    # a user's own Zammad login (often an admin) is never what creates data, and
+    # so writing can be revoked on the Zammad side without breaking anyone's reads.
+    def _write(self, path: str, payload: dict) -> dict:
+        token = os.getenv("ZAMMAD_WRITE_TOKEN", "")
+        if not token:
+            raise RuntimeError("ZAMMAD_WRITE_TOKEN is not set; refusing to write to Zammad")
+        res = request("POST", f"{self.url}{path}", system="Zammad", retry=False,
+                      headers={"Authorization": f"Token token={token}"},
+                      json=payload, timeout=25)
+        res.raise_for_status()
+        return res.json() if res.content else {}
+
+    def add_note(self, ticket_id, body: str) -> dict:
+        """An internal note: visible to agents, never to the ticket's customer."""
+        return self._write("/api/v1/ticket_articles", {
+            "ticket_id": int(ticket_id), "body": body, "content_type": "text/plain",
+            "type": "note", "internal": True})
+
+    def add_tag(self, ticket_id, tag: str) -> dict:
+        return self._write("/api/v1/tags/add", {
+            "item": tag, "object": "Ticket", "o_id": int(ticket_id)})
 
     def state_map(self) -> dict:
         try:

@@ -579,3 +579,26 @@ Python has no pytest.
 
 **Viewing the database.** Open `backend/iqcore.db` in DB Browser for SQLite (read-only
 while the app runs). Service secrets show as ciphertext by design.
+
+### Ticket assist (the only write) — Zammad-side setup
+
+Code: `backend/agent/ticket_assist.py`, `ZammadClient.add_note/add_tag`,
+`POST /hooks/zammad/ticket-created`. Off by default; see the README section.
+
+Found on the live Zammad (6.5.2) on 2026-10-09, and the reason for each step:
+
+1. **Token** "IQ Core ticket assist", permission `ticket.agent` only ->
+   `ZAMMAD_WRITE_TOKEN`. The app's read login is an Admin user; do not write with it.
+2. **Webhook** to `http://<iqcore-host>:8000/hooks/zammad/ticket-created` with a
+   signature token -> the same value in `ZAMMAD_WEBHOOK_SECRET`.
+3. **Narrow trigger "2 New Article Created"**: it emails the ticket's customer the body
+   of every article an Agent adds, internal or not. Add *Article visibility is public*,
+   or the AI note is emailed out.
+4. **Trigger** "IQ Core: suggest fix": *Action is created* and *Tags contains one not
+   `iqcore-suggested`*, perform = the webhook.
+
+Zabbix and people create tickets through the same account, so only the alert template
+in the first article (`parse_zabbix_ticket_body`) tells them apart. Ticket links point
+at Zabbix `192.168.1.180` while `ZABBIX_URL` is `192.168.1.205:8080`, which is why
+version 1 does not look anything up in Zabbix. Not yet verified on a real ticket: the
+exact `X-Hub-Signature` format, and that step 3 stops the customer email.

@@ -5,7 +5,7 @@ import threading
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -15,7 +15,7 @@ import numpy as np
 
 from agent.graph import COMPILED_GRAPH
 from agent import (answer_cache, auth_store, config_store, config_test, db,
-                   streaming, suggestions, telemetry)
+                   streaming, suggestions, telemetry, ticket_assist)
 
 load_dotenv()
 
@@ -213,6 +213,26 @@ def me(user: dict = Depends(current_user)):
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.post("/hooks/zammad/ticket-created", status_code=202)
+async def zammad_ticket_created(request: Request, background: BackgroundTasks):
+    """Zammad calls this when a ticket is created; IQ Core suggests a fix.
+
+    The only endpoint that leads to a write, so it is the only one that checks
+    who is calling: the body must carry Zammad's HMAC signature. It answers
+    202 at once and does the work afterwards, because Zammad waits on the
+    response and a model call can take longer than its webhook timeout.
+    """
+    raw = await request.body()
+    if not ticket_assist.signature_ok(raw, request.headers.get("X-Hub-Signature", "")):
+        raise HTTPException(status_code=401, detail="bad or missing signature")
+    try:
+        ticket_id = int(json.loads(raw)["ticket"]["id"])
+    except (ValueError, KeyError, TypeError):
+        raise HTTPException(status_code=400, detail="payload has no ticket id")
+    background.add_task(ticket_assist.handle, ticket_id)
+    return {"status": "accepted", "ticket_id": ticket_id, "mode": ticket_assist.mode()}
 
 
 @app.post("/chat/stream")

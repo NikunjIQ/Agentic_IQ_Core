@@ -33,3 +33,7 @@ Thumbs.db
 ceph_probe.json
 probe_*.json
 graph.png
+
+# Ticket assist output — real ticket text and model suggestions, not source
+ticket_assist.jsonl
+ticket_assist_review.csv

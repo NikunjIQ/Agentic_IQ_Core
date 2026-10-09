@@ -251,6 +251,37 @@ than a smaller total.
 
 ---
 
+## Ticket assist — the one write
+
+Everything above only reads. This is the exception: when Zabbix raises a ticket, IQ
+Core adds a suggested fix to it as an **internal note**, so whoever picks the ticket up
+starts with something more than the raw alert.
+
+```
+Zabbix alert -> Zammad ticket -> Zammad trigger -> signed webhook
+   -> POST /hooks/zammad/ticket-created -> one model call -> internal note + tag
+```
+
+It ships **off**. `TICKET_ASSIST_MODE=dry_run` generates and logs the suggestion to
+`backend/ticket_assist.jsonl` without writing; `write` also adds the note. To stop it,
+set the mode back to `off` or disable the Zammad trigger.
+
+- Only Zabbix alert tickets are touched; a ticket raised by a person is skipped.
+- The note is labelled AI-generated. It is built from the alert text and general
+  knowledge — the host is **not** inspected — so it is advice to verify, not a diagnosis.
+- One note per ticket: the ticket is tagged `iqcore-suggested` and skipped after that.
+- `TICKET_ASSIST_DAILY_LIMIT` (default 40) stops an alert storm spending the day's
+  tokens; a repeated problem reuses its suggestion for 24 hours.
+- The webhook must carry Zammad's HMAC signature (`ZAMMAD_WEBHOOK_SECRET`). Ticket
+  assist acts as its own Zammad user through an agent-only token
+  (`ZAMMAD_WRITE_TOKEN`), never through a signed-in user's credentials.
+
+`python tests/replay_ticket_assist.py --limit 20` replays recent tickets with no writes
+and saves the suggestions to a CSV for the team to score — the baseline for judging
+any later change. Zammad-side setup is in `HANDOVER.md` §12.
+
+---
+
 ## Guardrails
 
 | Guard | Purpose |
@@ -329,6 +360,9 @@ limiting. Credit is shown, never enforced — a balance can go negative.
 
 **Saved conversations are trimmed.** Each stored table is capped at 500 rows and the
 raw tool output is dropped, so a reopened answer says its reasoning detail wasn't kept.
+
+**The ticket-assist webhook sits outside the login gate.** Zammad cannot sign in, so
+`/hooks/zammad/ticket-created` accepts only requests carrying Zammad's HMAC signature.
 
 **No logging.** There is no record of what the agent did after the fact.
 
