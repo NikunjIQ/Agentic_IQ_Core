@@ -32,9 +32,8 @@ _lock = threading.Lock()
 FIELD_GROUPS = [
     ("Zabbix", "Network devices, Windows hosts", [
         ("ZABBIX_URL", "URL", False, "http://192.168.1.205:8080"),
-        ("ZABBIX_API_TOKEN", "API token", True, ""),
-        ("ZABBIX_USER", "Username (only if no token)", False, ""),
-        ("ZABBIX_PASS", "Password (only if no token)", True, ""),
+        ("ZABBIX_USER", "Username", False, ""),
+        ("ZABBIX_PASS", "Password", True, ""),
     ]),
     ("Zammad", "Helpdesk tickets", [
         ("ZAMMAD_URL", "URL", False, "http://192.168.1.205:8082"),

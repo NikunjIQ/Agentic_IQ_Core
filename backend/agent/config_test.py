@@ -45,10 +45,7 @@ def test_zabbix(cfg: dict) -> dict:
     if not url.endswith("api_jsonrpc.php"):
         url += "/api_jsonrpc.php"
 
-    token = str(cfg.get("ZABBIX_API_TOKEN", "")).strip()
     headers = {"Content-Type": "application/json-rpc"}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
 
     try:
         # apiinfo.version separates "wrong URL" from "wrong credentials", which is
@@ -62,25 +59,18 @@ def test_zabbix(cfg: dict) -> dict:
         if not version:
             return _fail("reachable, but did not look like a Zabbix API endpoint")
 
-        if not token:
-            user = str(cfg.get("ZABBIX_USER", "")).strip()
-            password = str(cfg.get("ZABBIX_PASS", "")).strip()
-            if not (user and password):
-                return _fail(f"Zabbix {version} reachable, but no API token or username/password given")
-            for key in ("username", "user"):
-                probe = requests.post(url, headers=headers, timeout=TIMEOUT, json={
-                    "jsonrpc": "2.0", "method": "user.login",
-                    "params": {key: user, "password": password}, "id": 1}).json()
-                if probe.get("result"):
-                    return _ok(f"Zabbix {version} — signed in as {user}")
-            return _fail(f"Zabbix {version} reachable, but the username/password was rejected")
-
-        probe = requests.post(url, headers=headers, timeout=TIMEOUT, json={
-            "jsonrpc": "2.0", "method": "host.get",
-            "params": {"output": ["hostid"], "limit": 1}, "id": 2}).json()
-        if "error" in probe:
-            return _fail(f"Zabbix {version} reachable, but the API token was rejected")
-        return _ok(f"Zabbix {version} — token accepted")
+        user = str(cfg.get("ZABBIX_USER", "")).strip()
+        password = str(cfg.get("ZABBIX_PASS", "")).strip()
+        if not (user and password):
+            return _fail(f"Zabbix {version} reachable, but no username and password given")
+        # "username" since 6.0; "user" is all an older server understands.
+        for key in ("username", "user"):
+            probe = requests.post(url, headers=headers, timeout=TIMEOUT, json={
+                "jsonrpc": "2.0", "method": "user.login",
+                "params": {key: user, "password": password}, "id": 1}).json()
+            if probe.get("result"):
+                return _ok(f"Zabbix {version} — signed in as {user}")
+        return _fail(f"Zabbix {version} reachable, but the username/password was rejected")
     except Exception as exc:
         return _fail(_describe(exc))
 
