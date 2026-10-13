@@ -851,18 +851,22 @@ async function post(path, body, busyLabel) {
 
 function show(page) {
   // The server refuses /admin to anyone else; this just avoids a dead page.
-  if (page === "users" && !(state.me && state.me.role === "admin")) page = "chat";
+  if (page === "users" && !(state.me && state.me.role === "admin")) page = "dashboard";
+  if (!$("page-" + page)) page = "dashboard";
   for (const tab of document.querySelectorAll(".tab[data-page]")) {
     const on = tab.dataset.page === page;
     tab.toggleAttribute("aria-current", on);
     if (on) tab.setAttribute("aria-current", "page");
   }
+  $("page-dashboard").hidden = page !== "dashboard";
   $("page-chat").hidden = page !== "chat";
   $("page-connections").hidden = page !== "connections";
   $("page-users").hidden = page !== "users";
   $("composer").hidden = page !== "chat";
   if (page === "connections") loadConfig();
   if (page === "users") loadUsers();
+  // After un-hiding: a chart drawn into a hidden box has no size.
+  if (page === "dashboard") Dashboard.open(); else Dashboard.close();
   if (location.hash.slice(1) !== page) location.hash = page;
 }
 
@@ -870,7 +874,7 @@ function show(page) {
 
 document.querySelectorAll(".tab[data-page]").forEach((tab) =>
   tab.addEventListener("click", () => show(tab.dataset.page)));
-window.addEventListener("hashchange", () => show(location.hash.slice(1) || "chat"));
+window.addEventListener("hashchange", () => show(location.hash.slice(1) || "dashboard"));
 
 $("ask").addEventListener("submit", (e) => {
   e.preventDefault();
@@ -1247,6 +1251,7 @@ function resetSession() {
   state.me = null;
   state.conversationId = null;
   state.pins = [];
+  Dashboard.reset();
   closeDrawer();
   $("pins").innerHTML = "";
   $("convos").innerHTML = "";
@@ -1290,8 +1295,8 @@ async function openApp() {
   await refreshMe();
   checkConfigured();
   loadPins();
-  show(location.hash.slice(1) || "chat");
-  $("q").focus();
+  show(location.hash.slice(1) || "dashboard");
+  if (!$("page-chat").hidden) $("q").focus();
 }
 
 $("gate-switch").addEventListener("click", () => gateMode(!signingUp));

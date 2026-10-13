@@ -1179,7 +1179,7 @@ def test_blocking_endpoints_are_not_declared_async():
     """
     import inspect
     import main
-    for name in ("test_config", "save_config"):
+    for name in ("test_config", "save_config", "dashboard_source"):
         handler = getattr(main, name)
         assert not inspect.iscoroutinefunction(handler), (
             f"{name} is async but blocks; FastAPI cannot move it off the event loop")
@@ -2143,3 +2143,76 @@ def test_zammad_writes_use_their_own_token_and_are_never_retried():
     finally:
         os.environ.pop("ZAMMAD_WRITE_TOKEN", None) if saved is None else os.environ.update(
             {"ZAMMAD_WRITE_TOKEN": saved})
+
+
+# --- dashboard: figures straight from each system, no model ------------------
+def test_dashboard_tiles_fail_one_at_a_time_and_are_cached(monkeypatch):
+    """One system being down or unconnected must blank its own tile, not the page."""
+    from fastapi.testclient import TestClient
+    import main
+    from agent import config_store, dashboard
+    calls, seen_users = [], []
+
+    def healthy():
+        calls.append("zabbix")
+        seen_users.append(config_store.current_user_id())
+        return {"hosts": {"total": 3}}
+
+    def unconnected():
+        raise config_store.NotConnected("Zammad isn't connected for your account")
+
+    def broken():
+        raise RuntimeError("API token expired.")
+
+    monkeypatch.setitem(dashboard.SOURCES, "zabbix", healthy)
+    monkeypatch.setitem(dashboard.SOURCES, "zammad", unconnected)
+    monkeypatch.setitem(dashboard.SOURCES, "ceph", broken)
+    with _fresh_db():
+        client = TestClient(main.app)
+        assert client.get("/dashboard/zabbix").status_code == 401, "needs a session"
+        assert client.post("/auth/signup", json={"username": "nikunj", "password": "secret123",
+                                                 "email": "n@example.com"}).json()["ok"]
+
+        ok = client.get("/dashboard/zabbix").json()
+        assert ok["status"] == "ok" and ok["data"] == {"hosts": {"total": 3}}
+        assert seen_users and seen_users[0] is not None, "the source must run as the signed-in user"
+        assert client.get("/dashboard/zammad").json()["status"] == "not_connected"
+        failed = client.get("/dashboard/ceph").json()
+        assert failed["status"] == "error" and "API token expired" in failed["message"]
+        assert client.get("/dashboard/nonsense").status_code == 404
+
+        # A second look inside the minute costs the source system nothing...
+        client.get("/dashboard/zabbix")
+        assert calls == ["zabbix"]
+        # ...and the Refresh button goes around the cache.
+        client.get("/dashboard/zabbix?fresh=true")
+        assert calls == ["zabbix", "zabbix"]
+        dashboard.Cached.clear_all()
+
+
+def test_dashboard_zabbix_counts_only_monitored_hosts(monkeypatch):
+    """Disabled hosts are not "unknown"; they are not monitored at all."""
+    from agent import dashboard
+
+    class _Zabbix:
+        def hosts(self):
+            up = {"status": "0", "name": "sw1", "active_available": "0",
+                  "interfaces": [{"available": "1"}]}
+            down = {"status": "0", "name": "r1", "active_available": "0",
+                    "interfaces": [{"available": "2"}]}
+            unreachable = {"status": "0", "name": "r2", "active_available": "0",
+                           "interfaces": [{"available": "1", "error": "timeout"}]}
+            disabled = {"status": "1", "name": "old", "interfaces": []}
+            return [up, down, unreachable, disabled]
+
+        def problems(self, limit=500):
+            return [{"severity": "4", "acknowledged": "0"}, {"severity": "4", "acknowledged": "1"},
+                    {"severity": "2", "acknowledged": "0"}]
+
+    monkeypatch.setattr(dashboard, "ZabbixClient", _Zabbix)
+    data = dashboard.zabbix()
+    assert data["hosts"] == {"total": 3, "up": 1, "down": 2, "unknown": 0,
+                             "down_names": ["r1", "r2"]}
+    counts = {row["severity"]: row["count"] for row in data["problems"]["by_severity"]}
+    assert counts["High"] == 2 and counts["Warning"] == 1 and counts["Disaster"] == 0
+    assert data["problems"]["total"] == 3 and data["problems"]["unacknowledged"] == 2
