@@ -65,13 +65,31 @@ const Dashboard = (() => {
     return node;
   }
 
+  // ECharts measures its box once, when the chart is created. A box that is
+  // hidden or not yet laid out at that moment measures zero, and the chart
+  // then draws 100px wide in a card five times that. Following the box's own
+  // size covers every way that happens: a reply landing after the user has
+  // switched tab, the grid reflowing, the window resizing.
+  const sizes = new ResizeObserver((entries) => {
+    for (const entry of entries) {
+      const chart = charts[entry.target.id];
+      if (chart && entry.contentRect.width) chart.resize();
+    }
+  });
+
+  function dispose(node) {
+    if (!charts[node.id]) return;
+    sizes.unobserve(node);
+    charts[node.id].dispose();
+    delete charts[node.id];
+  }
+
   // A card is updated in place, so a part that no longer applies has to be
   // taken out by hand or it lingers beside the data that replaced it.
   function drop(parent, ...keys) {
     for (const key of keys) {
       const node = parent.querySelector(`:scope > [data-key="${key}"]`);
-      if (node && charts[node.id]) { charts[node.id].dispose(); delete charts[node.id]; }
-      if (node) node.remove();
+      if (node) { dispose(node); node.remove(); }
     }
   }
 
@@ -119,7 +137,11 @@ const Dashboard = (() => {
     box.style.height = height + "px";
     if (!box.id) box.id = "dash-" + Math.random().toString(36).slice(2);
     askable(box, question);
-    const chart = charts[box.id] || (charts[box.id] = echarts.init(box));
+    let chart = charts[box.id];
+    if (!chart) {
+      chart = charts[box.id] = echarts.init(box);
+      sizes.observe(box);
+    }
     chart.setOption({ ...theme(), ...option }, true);
     return chart;
   }
@@ -401,9 +423,7 @@ const Dashboard = (() => {
   }
 
   function clear(body) {
-    for (const node of body.querySelectorAll(".dash-plot")) {
-      if (charts[node.id]) { charts[node.id].dispose(); delete charts[node.id]; }
-    }
+    for (const node of body.querySelectorAll(".dash-plot")) dispose(node);
     body.innerHTML = "";
     delete body.dataset.state;
   }
@@ -512,15 +532,13 @@ const Dashboard = (() => {
   // A shared screen must not show the next account the last one's numbers.
   function reset() {
     close();
+    sizes.disconnect();
     for (const id of Object.keys(charts)) { charts[id].dispose(); delete charts[id]; }
     for (const key of Object.keys(last)) delete last[key];
     if (built) { $("dash-strip").innerHTML = $("dash-grid").innerHTML = ""; }
     built = false;
   }
 
-  window.addEventListener("resize", () => {
-    for (const id of Object.keys(charts)) charts[id].resize();
-  });
   // The charts take their colours from CSS variables at draw time, so a theme
   // change means drawing them again.
   new MutationObserver(redraw).observe(document.documentElement,
