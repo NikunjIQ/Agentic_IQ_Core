@@ -2443,3 +2443,19 @@ def test_zabbix_signs_in_with_a_password_and_reuses_the_session(monkeypatch):
         assert sent[-1] == ("host.get", "Bearer session-2")
     finally:
         zabbix._SESSION.clear()
+
+
+def test_zabbix_ticket_body_parses_from_html_as_from_text():
+    """A ticket typed into Zammad's editor is one line of HTML; each field must
+    stop at its own line, or the host reads as '192.168.1.163</div><div>Severity...'."""
+    from tools.correlation import parse_zabbix_ticket_body
+    lines = ["Problem started at 10:45:28 on 2026.10.29",
+             "Problem name: Linux: Load average is too high (per CPU load over 1.5 for 5m)",
+             "Host: 192.168.1.163", "Severity: Average", "Original problem ID: 9990001",
+             "http://192.168.1.180/zabbix.php?triggerid=32864&eventid=9990001"]
+    expected = parse_zabbix_ticket_body("\n".join(lines))
+    assert expected["host"] == "192.168.1.163" and expected["event_id"] == "9990001"
+    as_divs = "".join(f"<div>{line.replace('&', '&amp;')}</div>" for line in lines)
+    as_breaks = "<p>" + "<br>".join(line.replace("&", "&amp;") for line in lines) + "</p>"
+    for body in (as_divs, as_breaks):
+        assert parse_zabbix_ticket_body(body) == expected, body

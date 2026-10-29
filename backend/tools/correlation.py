@@ -11,6 +11,7 @@ Rows that have no ticket are kept rather than dropped — "this is broken and
 nobody raised a ticket" is usually the most useful answer in the table.
 """
 
+import html
 import re
 from typing import Optional
 
@@ -41,11 +42,19 @@ _BODY_PATTERNS = {
 }
 
 
+# A body typed or pasted into Zammad's editor is HTML on one line, so "Host:
+# (.+)" would run on through every later field. Line-ending tags become newlines.
+_LINE_END_TAG = re.compile(r"<\s*(?:br|/div|/p|/li|/tr)\s*/?\s*>", re.I)
+_ANY_TAG = re.compile(r"<[^>]+>")
+
+
 def parse_zabbix_ticket_body(body: str) -> dict:
     """Pull Zabbix identifiers out of an auto-created ticket body."""
     out = {}
     if not body:
         return out
+    if "<" in body:
+        body = html.unescape(_ANY_TAG.sub("", _LINE_END_TAG.sub("\n", body)))
     for field, pattern in _BODY_PATTERNS.items():
         match = pattern.search(body)
         if not match:
