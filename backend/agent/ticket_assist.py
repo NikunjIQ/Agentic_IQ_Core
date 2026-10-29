@@ -3,7 +3,8 @@
 This is the only place IQ Core writes to anything. Zabbix raises a ticket, a
 Zammad trigger calls /hooks/zammad/ticket-created, and this module reads the
 alert, asks the model for a short fix, and adds it to the ticket as an internal
-note for whoever picks the ticket up.
+note for whoever picks the ticket up. When an Ansible playbook covers the alert
+(tools/ansible_tool.py, ANSIBLE_MODE), its read-only output is added to the note.
 
 It ships switched off. TICKET_ASSIST_MODE=dry_run does everything except the
 write and records what it would have written; only =write touches Zammad.
@@ -25,11 +26,13 @@ from pathlib import Path
 
 from agent import telemetry
 from agent.models import REASONING_MODEL
+from tools import ansible_tool
 from tools.clients import ZammadClient
 from tools.correlation import parse_zabbix_ticket_body
 
 TAG = "iqcore-suggested"
 HEADER = "IQ Core suggestion (AI-generated - verify before acting)"
+DIAG_HEADER = "IQ Core diagnostics: '{playbook}' on {host}, run read-only via Ansible ({status})"
 LOG_PATH = Path(os.getenv("TICKET_ASSIST_LOG",
                           Path(__file__).resolve().parent.parent / "ticket_assist.jsonl"))
 REUSE_SECONDS = 24 * 3600
@@ -150,6 +153,24 @@ def suggest_fix(parsed: dict, body: str) -> str:
     return text
 
 
+def diagnose(parsed: dict) -> dict:
+    """The Ansible playbook result for this alert, or why there is none.
+
+    Never raises: a diagnostic that fails must not cost the ticket its
+    suggestion. Empty when Ansible is off or no playbook covers the alert.
+    """
+    current = ansible_tool.mode()
+    playbook = ansible_tool.playbook_for(parsed.get("problem_name", ""))
+    if current == "off" or not playbook:
+        return {}
+    host = parsed.get("host", "")
+    try:
+        return ansible_tool.run_ansible(playbook, host, dry_run=current == "dry_run")
+    except Exception as exc:
+        return {"playbook": playbook, "host": host, "status": "skipped",
+                "error": f"{type(exc).__name__}: {str(exc)[:300]}"}
+
+
 def _process(ticket_id: int, client, current_mode: str) -> dict:
     if current_mode == "off":
         return {"outcome": "skipped", "reason": "ticket assist is switched off"}
@@ -184,8 +205,14 @@ def _process(ticket_id: int, client, current_mode: str) -> dict:
             return {**found, "outcome": "skipped", "reason": "daily limit reached"}
         _day["count"] += 1
 
+    diagnosis = diagnose(parsed)
+    if diagnosis:
+        found["ansible"] = {k: v for k, v in diagnosis.items() if k != "report"}
+
     telemetry.start()
     note = f"{HEADER}\n\n{suggest_fix(parsed, body)}"
+    if diagnosis.get("report"):
+        note += f"\n\n{DIAG_HEADER.format(**diagnosis)}\n{diagnosis['report']}"
     found.update(suggestion=note, tokens=telemetry.summary().get("total_tokens", 0))
 
     if current_mode != "write":

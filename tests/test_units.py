@@ -1295,7 +1295,8 @@ def test_retries_can_be_switched_off():
 def test_every_client_goes_through_the_retry_helper():
     """A client calling requests directly is one that silently does not retry."""
     import pathlib
-    for path in ("backend/tools/clients.py", "backend/tools/zabbix/client.py"):
+    for path in ("backend/tools/clients.py", "backend/tools/zabbix/client.py",
+                 "backend/tools/ansible_tool.py"):
         source = pathlib.Path(path).read_text(encoding="utf-8")
         body = source.split("def request(", 1)[-1] if "def request(" in source else source
         assert "requests.get(" not in body and "requests.post(" not in body, (
@@ -2143,3 +2144,176 @@ def test_zammad_writes_use_their_own_token_and_are_never_retried():
     finally:
         os.environ.pop("ZAMMAD_WRITE_TOKEN", None) if saved is None else os.environ.update(
             {"ZAMMAD_WRITE_TOKEN": saved})
+
+
+# --- ansible: IQ Core's first tool that acts on servers -----------------------
+# The tail of a real Semaphore run of "Top processes" on VM 163.
+_ANSIBLE_LOG = [
+    "TASK [Processes by memory] *****************************************************",
+    "ok: [192.168.1.163]",
+    "",
+    "TASK [Report] ******************************************************************",
+    "ok: [192.168.1.163] => ",
+    "    msg:",
+    "        memory_mb:",
+    "        - 'Mem:           15985        4913         194          98       10877       10634'",
+    "        top_cpu:",
+    "        - ' 770673 lxd       20   0 5123784 801372  37116 S   2.9   4.9 543:16.74 mysqld'",
+    "        uptime: ' 05:11:20 up 22 days, 23:31,  3 users,  load average: 3.22, 2.85, 2.92'",
+    "",
+    "PLAY RECAP *********************************************************************",
+    "192.168.1.163              : ok=6    changed=0    unreachable=0    failed=0",
+]
+
+
+class _FakeAnsible:
+    """Stands in for AnsibleClient: one template, one inventory, scripted statuses."""
+
+    def __init__(self, statuses=("running", "success"), log=_ANSIBLE_LOG):
+        self.statuses, self.log, self.started = list(statuses), log, []
+
+    def templates(self):
+        return [{"id": 7, "name": "Top processes", "inventory_id": 3}]
+
+    def inventory(self, inventory_id):
+        assert inventory_id == 3
+        return "# diagnostics\n[linux]\n192.168.1.163\nweb01 ansible_host=10.0.0.5\n"
+
+    def start(self, template_id, host):
+        self.started.append((template_id, host))
+        return 42
+
+    def status(self, task_id):
+        return self.statuses.pop(0) if len(self.statuses) > 1 else self.statuses[0]
+
+    def output(self, task_id):
+        return self.log
+
+
+def test_ansible_picks_a_playbook_only_for_covered_alerts():
+    from tools import ansible_tool
+    assert ansible_tool.playbook_for(
+        "Linux: Load average is too high (per CPU load over 1.5 for 5m)") == "Top processes"
+    assert ansible_tool.playbook_for("Linux: High CPU utilization (over 90% for 5m)") == "Top processes"
+    assert ansible_tool.playbook_for("Linux: Nikunj VM has been restarted (uptime < 10m)") is None
+    assert ansible_tool.playbook_for("") is None
+
+
+def test_ansible_inventory_reads_the_first_word_of_host_lines():
+    from tools import ansible_tool
+    hosts = ansible_tool.inventory_hosts(_FakeAnsible().inventory(3))
+    assert hosts == {"192.168.1.163", "web01"}
+
+
+def test_ansible_refuses_anything_but_one_known_host():
+    """Ansible's limit reads patterns: 'all', '*' or a comma would reach every server."""
+    import pytest
+    from tools import ansible_tool
+    for host in ("all", "ALL", "*", "192.168.1.*", "192.168.1.163,192.168.1.31",
+                 "192.168.1.163:web01", "!web01", "Nikunj VM", "", "192.168.1.31"):
+        client = _FakeAnsible()
+        with pytest.raises(ValueError):
+            ansible_tool.run_ansible("Top processes", host, client)
+        assert client.started == [], f"{host!r} must never start a run"
+    client = _FakeAnsible()
+    with pytest.raises(ValueError, match="no template"):
+        ansible_tool.run_ansible("Restart everything", "192.168.1.163", client)
+    assert client.started == []
+
+
+def test_ansible_dry_run_checks_everything_but_starts_nothing():
+    from tools import ansible_tool
+    client = _FakeAnsible()
+    result = ansible_tool.run_ansible("Top processes", "192.168.1.163", client, dry_run=True)
+    assert result == {"playbook": "Top processes", "host": "192.168.1.163", "status": "dry_run"}
+    assert client.started == []
+
+
+def test_ansible_run_returns_only_the_report(monkeypatch):
+    from tools import ansible_tool
+    monkeypatch.setattr(ansible_tool.time, "sleep", lambda seconds: None)
+    client = _FakeAnsible()
+    result = ansible_tool.run_ansible("Top processes", "192.168.1.163", client)
+    assert client.started == [(7, "192.168.1.163")]
+    assert result["status"] == "success" and result["task_id"] == 42
+    report = result["report"]
+    assert report.startswith("memory_mb:") and "mysqld" in report and "load average" in report
+    for noise in ("PLAY RECAP", "ok: [", "Processes by memory", "msg:"):
+        assert noise not in report, noise
+
+
+def test_ansible_failure_reports_the_end_of_the_log(monkeypatch):
+    """A down server is worth saying so in the ticket."""
+    from tools import ansible_tool
+    monkeypatch.setattr(ansible_tool.time, "sleep", lambda seconds: None)
+    log = ["TASK [Load and uptime] ****",
+           "fatal: [192.168.1.163]: UNREACHABLE! => changed=false"]
+    result = ansible_tool.run_ansible("Top processes", "192.168.1.163",
+                                      _FakeAnsible(statuses=("error",), log=log))
+    assert result["status"] == "error" and "UNREACHABLE" in result["report"]
+
+
+def test_ansible_gives_up_on_a_run_that_never_finishes(monkeypatch):
+    from tools import ansible_tool
+    monkeypatch.setattr(ansible_tool.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(ansible_tool, "RUN_SECONDS", 0)
+    result = ansible_tool.run_ansible("Top processes", "192.168.1.163",
+                                      _FakeAnsible(statuses=("running",)))
+    assert result["status"] == "timed out"
+
+
+_LOAD_BODY = _ZABBIX_BODY.replace(
+    "Linux: Nikunj VM has been restarted (uptime < 10m)",
+    "Linux: Load average is too high (per CPU load over 1.5 for 5m)").replace(
+    "Host: Nikunj VM", "Host: 192.168.1.163")
+
+
+def test_ticket_assist_adds_the_ansible_report_to_the_note(monkeypatch):
+    from agent import ticket_assist
+    from tools import ansible_tool
+    ticket_assist._reset()
+    calls = []
+
+    def fake_run(playbook, host, client=None, dry_run=False):
+        calls.append((playbook, host, dry_run))
+        return {"playbook": playbook, "host": host, "status": "success",
+                "report": "top_cpu: mysqld"}
+
+    monkeypatch.setattr(ansible_tool, "run_ansible", fake_run)
+    client = _FakeZammad(body=_LOAD_BODY)
+    record = _assist("write", client, ANSIBLE_MODE="run")
+    assert calls == [("Top processes", "192.168.1.163", False)]
+    note = client.writes[1][2]
+    assert note.startswith(ticket_assist.HEADER) and "- check the uptime" in note
+    assert "'Top processes' on 192.168.1.163" in note and note.endswith("top_cpu: mysqld")
+    assert record["ansible"] == {"playbook": "Top processes", "host": "192.168.1.163",
+                                 "status": "success"}
+
+
+def test_ticket_assist_still_writes_when_ansible_fails(monkeypatch):
+    """A failed or refused diagnostic must not cost the ticket its suggestion."""
+    from agent import ticket_assist
+    from tools import ansible_tool
+    ticket_assist._reset()
+
+    def broken(*args, **kwargs):
+        raise ValueError("192.168.1.163 is not in the inventory")
+
+    monkeypatch.setattr(ansible_tool, "run_ansible", broken)
+    client = _FakeZammad(body=_LOAD_BODY)
+    record = _assist("write", client, ANSIBLE_MODE="run")
+    assert record["outcome"] == "written" and "not in the inventory" in record["ansible"]["error"]
+    assert "diagnostics" not in client.writes[1][2]
+
+
+def test_ticket_assist_leaves_ansible_alone_when_off(monkeypatch):
+    from agent import ticket_assist
+    from tools import ansible_tool
+    ticket_assist._reset()
+
+    def must_not_run(*args, **kwargs):
+        raise AssertionError("Ansible is off; nothing may run")
+
+    monkeypatch.setattr(ansible_tool, "run_ansible", must_not_run)
+    record = _assist("write", _FakeZammad(body=_LOAD_BODY), ANSIBLE_MODE="off")
+    assert record["outcome"] == "written" and "ansible" not in record
