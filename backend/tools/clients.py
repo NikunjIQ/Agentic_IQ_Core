@@ -207,46 +207,13 @@ _TICKET_CACHE = Cached("zammad tickets", TICKET_CACHE_TTL)
 # ---------------------------------------------------------------------------
 class ZabbixClient:
     def __init__(self):
-        _ensure_config("Zabbix")
-        url = cfg("ZABBIX_URL", "http://192.168.1.205:8080").rstrip("/")
-        if not url.endswith("api_jsonrpc.php"):
-            url += "/api_jsonrpc.php"
-        self.url = url
-        self.headers = {"Content-Type": "application/json-rpc"}
-        self._auth = None
-
-        token = cfg("ZABBIX_API_TOKEN", "")
-        if token:
-            self.headers["Authorization"] = f"Bearer {token}"
-        else:
-            user, password = cfg("ZABBIX_USER", ""), cfg("ZABBIX_PASS", "")
-            if user and password:
-                # 6.4+ renamed the login param from "user" to "username"
-                for key in ("username", "user"):
-                    try:
-                        res = request(
-                            "POST", self.url, system="Zabbix",
-                            headers=self.headers, timeout=15,
-                            json={"jsonrpc": "2.0", "method": "user.login",
-                                  "params": {key: user, "password": password},
-                                  "id": 1})
-                        data = res.json()
-                        if "result" in data:
-                            self._auth = data["result"]
-                            break
-                    except Exception:
-                        continue
+        # The same transport the Zabbix tools use, so there is one place that
+        # signs in. Imported here because that module imports this one.
+        from tools.zabbix.client import build_rpc
+        self._rpc = build_rpc()
 
     def call(self, method: str, params: dict) -> list:
-        payload = {"jsonrpc": "2.0", "method": method, "params": params, "id": 2}
-        if self._auth:
-            payload["auth"] = self._auth
-        res = request("POST", self.url, system="Zabbix",
-                      headers=self.headers, json=payload, timeout=30)
-        data = res.json()
-        if "error" in data:
-            raise RuntimeError(data["error"].get("data") or data["error"])
-        return data.get("result", [])
+        return self._rpc(method, params)
 
     # -- convenience wrappers -------------------------------------------------
 

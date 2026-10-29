@@ -251,6 +251,36 @@ than a smaller total.
 
 ---
 
+## Dashboard — the front page
+
+The page you land on after signing in. It shows each system's headline figures, read
+straight from that system's API by `backend/agent/dashboard.py`. **No model is called**,
+so opening or refreshing it costs no tokens.
+
+| System (what it watches) | Figures |
+|---|---|
+| Zabbix (network devices, Windows hosts) | hosts up / down / unknown; active problems by severity |
+| Zabbix + Zammad | active problems that have no ticket |
+| Zammad (helpdesk) | open backlog, unassigned; created vs closed per day, 14 days |
+| Prometheus (Linux servers, OpenStack VMs) | CPU / memory / disk per server; CPU over 24 h; scrape targets; VMs running |
+| OpenSearch (OpenStack logs) | lines, errors and warnings today; errors per hour; noisiest services |
+| Ceph (storage) | health and failing checks; raw capacity used; OSDs up; PGs clean; OSD map |
+| Ceph daemons (container logs) | distinct problems; when each daemon was last heard from |
+
+- **One request per system** (`GET /dashboard/<source>`), so a tile fills in as soon as
+  its own system answers. One that is down, or not connected for the signed-in user,
+  says so on its own tile and the rest still load.
+- **Cached for 60 seconds per user**, refreshed every minute while the page is open.
+  The Refresh button goes around the cache.
+- **Click any figure or chart** to ask IQCore about it: Chat opens with the question.
+- **Left off because they are slow:** Zammad SLA figures (need the full ticket
+  download), Ceph images and snapshots, Zabbix change history.
+- Charts are drawn with Apache ECharts 6.1.0, vendored at
+  `backend/static/vendor/echarts.min.js` (Apache-2.0). Nothing is loaded from the
+  internet; the page still works on an isolated LAN.
+
+---
+
 ## Ticket assist — the one write
 
 Everything above only reads. This is the exception: when Zabbix raises a ticket, IQ

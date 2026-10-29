@@ -638,7 +638,7 @@ def test_config_store_saves_and_reloads():
     with _isolated_store() as (store, _):
         assert store.is_configured() is False
         store.save({"ZABBIX_URL": "http://zbx.example:8080",
-                    "ZABBIX_API_TOKEN": "secret-token"})
+                    "ZABBIX_PASS": "secret-token"})
         assert store.is_configured() is True
         assert store.load()["ZABBIX_URL"] == "http://zbx.example:8080"
 
@@ -646,21 +646,21 @@ def test_config_store_saves_and_reloads():
 def test_config_store_blank_means_unchanged():
     """The UI shows masked secrets; blank must not wipe the stored value."""
     with _isolated_store("iqcore_test_creds2.json") as (store, _):
-        store.save({"ZABBIX_API_TOKEN": "keep-me", "ZABBIX_URL": "http://a"})
-        store.save({"ZABBIX_API_TOKEN": "", "ZABBIX_URL": "http://b"})
+        store.save({"ZABBIX_PASS": "keep-me", "ZABBIX_URL": "http://a"})
+        store.save({"ZABBIX_PASS": "", "ZABBIX_URL": "http://b"})
         config = store.load()
-        assert config["ZABBIX_API_TOKEN"] == "keep-me", "blank erased a stored secret"
+        assert config["ZABBIX_PASS"] == "keep-me", "blank erased a stored secret"
         assert config["ZABBIX_URL"] == "http://b"
 
 
 def test_config_store_masks_secrets_but_not_urls():
     with _isolated_store("iqcore_test_creds3.json") as (store, _):
         store.save({"ZABBIX_URL": "http://zbx.example:8080",
-                    "ZABBIX_API_TOKEN": "abcdefghijklmnop"})
+                    "ZABBIX_PASS": "abcdefghijklmnop"})
         masked = store.masked()
         assert masked["ZABBIX_URL"] == "http://zbx.example:8080", "URLs stay readable"
-        assert "abcdefghijklmnop" not in masked["ZABBIX_API_TOKEN"]
-        assert masked["ZABBIX_API_TOKEN"].endswith("mnop"), "last 4 chars aid recognition"
+        assert "abcdefghijklmnop" not in masked["ZABBIX_PASS"]
+        assert masked["ZABBIX_PASS"].endswith("mnop"), "last 4 chars aid recognition"
 
 
 def test_config_store_applies_to_environment():
@@ -694,7 +694,7 @@ def test_config_field_groups_cover_every_system():
     systems = {group[0] for group in config_store.FIELD_GROUPS}
     assert systems == {"Zabbix", "Zammad", "Prometheus", "OpenSearch", "Ceph",
                        "Ceph container logs", "Groq"}
-    for key in ("ZABBIX_API_TOKEN", "ZAMMAD_PASS", "PROMETHEUS_PASS", "PROMETHEUS_TOKEN",
+    for key in ("ZABBIX_PASS", "ZAMMAD_PASS", "PROMETHEUS_PASS", "PROMETHEUS_TOKEN",
                 "OPENSEARCH_PASS", "CEPH_PASS", "OPENSEARCH2_PASS", "GROQ_API_KEY"):
         assert key in config_store.SECRET_KEYS, f"{key} must be treated as a secret"
 
@@ -1179,7 +1179,7 @@ def test_blocking_endpoints_are_not_declared_async():
     """
     import inspect
     import main
-    for name in ("test_config", "save_config"):
+    for name in ("test_config", "save_config", "dashboard_source"):
         handler = getattr(main, name)
         assert not inspect.iscoroutinefunction(handler), (
             f"{name} is async but blocks; FastAPI cannot move it off the event loop")
@@ -1596,7 +1596,7 @@ def test_settings_are_per_user_and_secrets_are_sealed():
         a = auth_store.signup("alice", "secret123", "a@example.com")["user_id"]
         b = auth_store.signup("bob", "secret456", "b@example.com")["user_id"]
         config_store.user_save(a, {"ZABBIX_URL": "http://zbx-a",
-                                   "ZABBIX_API_TOKEN": "token-alice-1234", "CEPH_URL": ""})
+                                   "ZABBIX_PASS": "token-alice-1234", "CEPH_URL": ""})
         config_store.user_save(b, {"ZAMMAD_URL": "http://zammad-b"})
 
         with db.tx() as c:
@@ -1607,14 +1607,14 @@ def test_settings_are_per_user_and_secrets_are_sealed():
         probe = Cached("isolation probe", 60)
         try:
             config_store.use_user(a)
-            assert config_store.get("ZABBIX_API_TOKEN") == "token-alice-1234"
+            assert config_store.get("ZABBIX_PASS") == "token-alice-1234"
             config_store.require("Zabbix")
             probe.put("alice's devices")
             answer_cache.put("how many hosts", {"final_answer": "alice",
                                                 "complexity": "simple"}, [])
 
             config_store.use_user(b)
-            assert config_store.get("ZABBIX_API_TOKEN") == "", "bob must not see alice's token"
+            assert config_store.get("ZABBIX_PASS") == "", "bob must not see alice's token"
             try:
                 config_store.require("Zabbix")
                 raise AssertionError("bob has no Zabbix and must be told so")
@@ -1642,13 +1642,13 @@ def test_legacy_json_files_are_imported_once():
         ]}, f)
 
     with _isolated_store("iqcore_test_legacy.json") as (store, _):
-        store.save({"ZABBIX_URL": "http://zbx.legacy", "ZABBIX_API_TOKEN": "legacy-token",
+        store.save({"ZABBIX_URL": "http://zbx.legacy", "ZABBIX_PASS": "legacy-token",
                     "GROQ_API_KEY": "gsk-system"})
         with _fresh_db(auth_file) as (db, _):
             assert auth_store.login("nikunj", "old-pass1")["role"] == "admin"
             assert auth_store.login("priya", "old-pass2")["role"] == "user"
             settings = db.load_settings(db.find_user("nikunj")["id"])
-            assert settings["Zabbix"]["ZABBIX_API_TOKEN"] == "legacy-token"
+            assert settings["Zabbix"]["ZABBIX_PASS"] == "legacy-token"
             assert "Groq" not in settings, "Groq stays a system setting"
             assert db.load_settings(db.find_user("priya")["id"]) == {}
             db._ready.clear()
@@ -2317,3 +2317,129 @@ def test_ticket_assist_leaves_ansible_alone_when_off(monkeypatch):
     monkeypatch.setattr(ansible_tool, "run_ansible", must_not_run)
     record = _assist("write", _FakeZammad(body=_LOAD_BODY), ANSIBLE_MODE="off")
     assert record["outcome"] == "written" and "ansible" not in record
+
+
+# --- dashboard: figures straight from each system, no model ------------------
+def test_dashboard_tiles_fail_one_at_a_time_and_are_cached(monkeypatch):
+    """One system being down or unconnected must blank its own tile, not the page."""
+    from fastapi.testclient import TestClient
+    import main
+    from agent import config_store, dashboard
+    calls, seen_users = [], []
+
+    def healthy():
+        calls.append("zabbix")
+        seen_users.append(config_store.current_user_id())
+        return {"hosts": {"total": 3}}
+
+    def unconnected():
+        raise config_store.NotConnected("Zammad isn't connected for your account")
+
+    def broken():
+        raise RuntimeError("API token expired.")
+
+    monkeypatch.setitem(dashboard.SOURCES, "zabbix", healthy)
+    monkeypatch.setitem(dashboard.SOURCES, "zammad", unconnected)
+    monkeypatch.setitem(dashboard.SOURCES, "ceph", broken)
+    with _fresh_db():
+        client = TestClient(main.app)
+        assert client.get("/dashboard/zabbix").status_code == 401, "needs a session"
+        assert client.post("/auth/signup", json={"username": "nikunj", "password": "secret123",
+                                                 "email": "n@example.com"}).json()["ok"]
+
+        ok = client.get("/dashboard/zabbix").json()
+        assert ok["status"] == "ok" and ok["data"] == {"hosts": {"total": 3}}
+        assert seen_users and seen_users[0] is not None, "the source must run as the signed-in user"
+        assert client.get("/dashboard/zammad").json()["status"] == "not_connected"
+        failed = client.get("/dashboard/ceph").json()
+        assert failed["status"] == "error" and "API token expired" in failed["message"]
+        assert client.get("/dashboard/nonsense").status_code == 404
+
+        # A second look inside the minute costs the source system nothing...
+        client.get("/dashboard/zabbix")
+        assert calls == ["zabbix"]
+        # ...and the Refresh button goes around the cache.
+        client.get("/dashboard/zabbix?fresh=true")
+        assert calls == ["zabbix", "zabbix"]
+        dashboard.Cached.clear_all()
+
+
+def test_dashboard_zabbix_counts_only_monitored_hosts(monkeypatch):
+    """Disabled hosts are not "unknown"; they are not monitored at all."""
+    from agent import dashboard
+
+    class _Zabbix:
+        def hosts(self):
+            up = {"status": "0", "name": "sw1", "active_available": "0",
+                  "interfaces": [{"available": "1"}]}
+            down = {"status": "0", "name": "r1", "active_available": "0",
+                    "interfaces": [{"available": "2"}]}
+            unreachable = {"status": "0", "name": "r2", "active_available": "0",
+                           "interfaces": [{"available": "1", "error": "timeout"}]}
+            disabled = {"status": "1", "name": "old", "interfaces": []}
+            return [up, down, unreachable, disabled]
+
+        def problems(self, limit=500):
+            return [{"severity": "4", "acknowledged": "0"}, {"severity": "4", "acknowledged": "1"},
+                    {"severity": "2", "acknowledged": "0"}]
+
+    monkeypatch.setattr(dashboard, "ZabbixClient", _Zabbix)
+    data = dashboard.zabbix()
+    assert data["hosts"] == {"total": 3, "up": 1, "down": 2, "unknown": 0,
+                             "down_names": ["r1", "r2"]}
+    counts = {row["severity"]: row["count"] for row in data["problems"]["by_severity"]}
+    assert counts["High"] == 2 and counts["Warning"] == 1 and counts["Disaster"] == 0
+    assert data["problems"]["total"] == 3 and data["problems"]["unacknowledged"] == 2
+
+# --- zabbix sign-in: username and password, one session reused --------------
+def test_zabbix_signs_in_with_a_password_and_reuses_the_session(monkeypatch):
+    """An expired API token once outranked a valid password, with no way to clear it.
+
+    Username and password is now the only path. The session is kept, because a
+    sign-in per call would pile up thousands of session rows a day in Zabbix,
+    and replaced once when Zabbix ends it.
+    """
+    from tools import clients
+    from tools.zabbix import client as zabbix
+    sent = []
+
+    class _Reply:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return self.payload
+
+    def fake(method, url, **kwargs):
+        body, auth = kwargs["json"], kwargs["headers"].get("Authorization")
+        sent.append((body["method"], auth))
+        if body["method"] == "user.login":
+            logins = sum(1 for name, _ in sent if name == "user.login")
+            return _Reply({"result": f"session-{logins}"})
+        if auth == "Bearer session-1" and state["ended"]:
+            return _Reply({"error": {"data": "Session terminated, re-login, please."}})
+        if auth is None:
+            return _Reply({"error": {"data": "Not authorised."}})
+        return _Reply({"result": [{"hostid": "1"}]})
+
+    state = {"ended": False}
+    monkeypatch.setenv("ZABBIX_USER", "Admin")
+    monkeypatch.setenv("ZABBIX_PASS", "pw")
+    monkeypatch.setenv("ZABBIX_API_TOKEN", "an-expired-token")
+    monkeypatch.setattr(clients.requests, "request", fake)
+    zabbix._SESSION.clear()
+    try:
+        assert zabbix.build_rpc()("host.get", {}) == [{"hostid": "1"}]
+        assert clients.ZabbixClient().call("host.get", {}) == [{"hostid": "1"}]
+        assert [name for name, _ in sent].count("user.login") == 1, "one sign-in, reused"
+        assert all(auth != "Bearer an-expired-token" for _, auth in sent), "a token must be ignored"
+
+        state["ended"] = True          # Zabbix ends the session underneath us
+        assert zabbix.build_rpc()("host.get", {}) == [{"hostid": "1"}]
+        assert [name for name, _ in sent].count("user.login") == 2, "signed in again, once"
+        assert sent[-1] == ("host.get", "Bearer session-2")
+    finally:
+        zabbix._SESSION.clear()

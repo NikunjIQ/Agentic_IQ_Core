@@ -54,7 +54,8 @@
   <span class="brand">IQCore</span>
   <button class="tab" id="drawer-open" type="button" aria-controls="drawer">History</button>
   <nav class="tabs">
-    <button class="tab" data-page="chat" aria-current="page">Chat</button>
+    <button class="tab" data-page="dashboard" aria-current="page">Dashboard</button>
+    <button class="tab" data-page="chat">Chat</button>
     <button class="tab" data-page="connections">Connections</button>
     <button class="tab" data-page="users" data-admin hidden>Users</button>
   </nav>
@@ -89,8 +90,28 @@
 </aside>
 <div class="scrim" id="scrim" hidden></div>
 
+<!-- ------------------------------------------------------------- dashboard -->
+<main class="page dash" id="page-dashboard" hidden>
+  <div class="dash-head">
+    <div>
+      <h1>Operations at a glance</h1>
+      <p class="lede">
+        Live figures from each system, read straight from its API. No AI is
+        involved, so refreshing costs nothing. Click any figure or chart to ask
+        IQCore about it.
+      </p>
+    </div>
+    <div class="dash-tools">
+      <span class="dash-updated" id="dash-updated"></span>
+      <button class="btn ghost small" id="dash-refresh" type="button">Refresh</button>
+    </div>
+  </div>
+  <div class="dash-strip" id="dash-strip"></div>
+  <div class="dash-grid" id="dash-grid"></div>
+</main>
+
 <!-- ------------------------------------------------------------------ chat -->
-<main class="page" id="page-chat">
+<main class="page" id="page-chat" hidden>
   <div id="unconfigured"></div>
   <div id="thread"></div>
   <div id="empty">
@@ -103,7 +124,7 @@
   </div>
 </main>
 
-<div class="composer" id="composer">
+<div class="composer" id="composer" hidden>
   <div class="composer-inner">
     <div class="chips" id="chips"></div>
     <form class="ask" id="ask">
@@ -163,6 +184,8 @@
   </div>
 </main>
 
+<script src="/static/vendor/echarts.min.js"></script>
+<script src="/static/dashboard.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>

@@ -33,22 +33,13 @@ def fetch_live_metadata() -> str:
     
     # 1. Fetch Zabbix Hostgroups
     try:
-        zabbix_url = config_store.get("ZABBIX_URL", "http://192.168.1.205:8080").rstrip('/') + '/api_jsonrpc.php'
-        zabbix_token = config_store.get("ZABBIX_API_TOKEN", "")
-        if zabbix_token:
-            headers = {'Content-Type': 'application/json-rpc', 'Authorization': f'Bearer {zabbix_token}'}
-            payload = {
-                "jsonrpc": "2.0",
-                "method": "hostgroup.get",
-                "params": {"output": ["name"]},
-                "id": 1
-            }
-            res = requests.post(zabbix_url, headers=headers, json=payload, timeout=5)
-            if res.status_code == 200:
-                groups = [g.get('name') for g in res.json().get('result', []) if g.get('name')]
-                if groups:
-                    metadata_lines.append(f"- ZABBIX_HOST_GROUPS: {groups}")
-                    options["zabbix_groups"] = groups
+        if config_store.get("ZABBIX_USER", "") and config_store.get("ZABBIX_PASS", ""):
+            from tools.zabbix.client import build_rpc
+            groups = [g.get('name') for g in build_rpc()("hostgroup.get", {"output": ["name"]})
+                      if g.get('name')]
+            if groups:
+                metadata_lines.append(f"- ZABBIX_HOST_GROUPS: {groups}")
+                options["zabbix_groups"] = groups
     except Exception as e:
         metadata_lines.append(f"- ZABBIX_HOST_GROUPS: (Failed to fetch: {str(e)})")
 

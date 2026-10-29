@@ -311,27 +311,16 @@ def test_metric_keywords_do_not_fire_on_substrings():
     assert [m["label"] for m in requested_metrics("cpu & memory")] == ["CPU", "Memory"]
 
 
-def test_username_password_auth_works_alongside_the_token():
-    """The user/pass fallback was broken twice over and nothing noticed.
+def test_username_password_auth_reaches_zabbix():
+    """Sign-in was broken twice over and nothing noticed.
 
-    It is dead code whenever ZABBIX_API_TOKEN is set, which is how it stayed
-    broken: user.login's "user" parameter became "username" in 6.0 and was
-    removed in 6.4, and 6.4 also dropped the payload "auth" field in favour of
-    the Authorization header. Anyone configuring username and password through
-    the sidebar instead of a token hit both.
+    user.login's "user" parameter became "username" in 6.0 and was removed in
+    6.4, and 6.4 also dropped the payload "auth" field in favour of the
+    Authorization header. It stayed broken because an API token, then the
+    preferred path, hid it. Username and password is now the only path.
     """
-    import os
     from tools.zabbix.client import build_rpc
-
-    if not (os.getenv("ZABBIX_USER") and os.getenv("ZABBIX_PASS")):
-        return   # nothing to check on an installation that only has a token
-
-    original = os.environ.get("ZABBIX_API_TOKEN", "")
-    os.environ["ZABBIX_API_TOKEN"] = ""
-    try:
-        count = build_rpc()("host.get", {"countOutput": True})
-    finally:
-        os.environ["ZABBIX_API_TOKEN"] = original
+    count = build_rpc()("host.get", {"countOutput": True})
     assert int(count) > 0, "user/pass auth returned no hosts"
 
 

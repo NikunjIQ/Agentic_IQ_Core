@@ -14,7 +14,7 @@ import pandas as pd
 import numpy as np
 
 from agent.graph import COMPILED_GRAPH
-from agent import (answer_cache, auth_store, config_store, config_test, db,
+from agent import (answer_cache, auth_store, config_store, config_test, dashboard, db,
                    streaming, suggestions, telemetry, ticket_assist)
 
 load_dotenv()
@@ -208,6 +208,19 @@ def me(user: dict = Depends(current_user)):
             "remaining_paise": balance.get("remaining_paise", 0),
             "answers": balance.get("answers", 0),
             "paise_per_token": db.PAISE_PER_TOKEN}
+
+
+@app.get("/dashboard/{source}")
+def dashboard_source(source: str, fresh: bool = False, user: dict = Depends(current_user)):
+    """One system's headline figures for the dashboard. No model call, no tokens.
+
+    One request per system rather than one for all, so a tile fills in as soon
+    as its own system answers. Sync, like /chat: it blocks on that system's API.
+    """
+    if source not in dashboard.SOURCES:
+        raise HTTPException(status_code=404, detail="No such dashboard source.")
+    return json.loads(json.dumps(safe_serialize(
+        dashboard.fetch(user["id"], source, fresh)), default=str))
 
 
 @app.get("/health")
@@ -493,7 +506,7 @@ def index():
     load is cheaper than one person reloading in confusion.
     """
     html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
-    for asset in ("app.css", "app.js"):
+    for asset in ("app.css", "app.js", "dashboard.js"):
         stamp = int((STATIC_DIR / asset).stat().st_mtime)
         html = html.replace(f"/static/{asset}", f"/static/{asset}?v={stamp}")
     return HTMLResponse(html, headers={"Cache-Control": "no-store"})
