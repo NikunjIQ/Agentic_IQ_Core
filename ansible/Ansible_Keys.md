@@ -39,7 +39,7 @@ In IQ Core's `backend/.env` on VM 152.
 
 | Key | Connects | What it does | Status |
 |---|---|---|---|
-| `ANSIBLE_TOKEN` (setup step 9) | IQ Core → Semaphore API, as user `iqcore` | Starts the approved templates in the `IQ Core diagnostics` project and reads their output. Task Runner role, that project only | Created 2026-10-29, held in a password manager; not yet in `backend/.env` |
+| `ANSIBLE_TOKEN` (setup step 9) | IQ Core → Semaphore API, as user `iqcore` | Starts the approved templates in the `IQ Core diagnostics` project and reads their output. Task Runner role, that project only | In use since 2026-10-29: created through the API straight into `backend/.env` on VM 152 (Semaphore's UI has no token button); a dry-run check against the real Semaphore passed |
 | `ZAMMAD_WRITE_TOKEN` | IQ Core → Zammad, as user "IQ Core Assist" | Reads tickets and adds the internal note | In use (ticket assist) |
 | `ZAMMAD_WEBHOOK_SECRET` | Zammad → IQ Core | Proves a "new ticket" call really came from Zammad | In use (ticket assist) |
 

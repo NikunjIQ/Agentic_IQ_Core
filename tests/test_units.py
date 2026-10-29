@@ -2459,3 +2459,37 @@ def test_zabbix_ticket_body_parses_from_html_as_from_text():
     as_breaks = "<p>" + "<br>".join(line.replace("&", "&amp;") for line in lines) + "</p>"
     for body in (as_divs, as_breaks):
         assert parse_zabbix_ticket_body(body) == expected, body
+
+
+# Real output of Semaphore task #3 (VM 163, ticket 5494) as the API returns it:
+# every line wrapped in Ansible's colour codes, which Semaphore's web page hides.
+_G, _R = "\x1b[0;32m", "\x1b[0m"
+_COLOURED_REPORT = [
+    f"{_G}ok: [192.168.1.163] => {_R}",
+    f"{_G}    msg:{_R}",
+    f"{_G}        memory_mb:{_R}",
+    f"{_G}        - 'Mem:           15985        4933         297          98       10753       10610'{_R}",
+    f"{_G}        top_cpu:{_R}",
+    f"{_G}        - ' 770673 lxd       20   0 5123784 802164  37116 S   1.9   4.9 549:42.32 mysqld'{_R}",
+    f"{_G}        uptime: ' 09:46:34 up 23 days,  4:06,  4 users,  load average: 2.49, 5.03, 14.99'{_R}",
+    "",
+    "PLAY RECAP *********************************************************************",
+    f"{_G}192.168.1.163{_R}              : {_G}ok=6   {_R} changed=0    unreachable=0    failed=0",
+]
+
+
+def test_ansible_report_survives_colour_codes():
+    """Task #3 succeeded but the note got no diagnostics: the Report search
+    never matched through the colour codes."""
+    from tools import ansible_tool
+    for header in ("TASK [Report] ******", f"{_G}TASK [Report] ******{_R}"):
+        report = ansible_tool.report_from([header] + _COLOURED_REPORT, succeeded=True)
+        assert "\x1b" not in report, "colour codes must not reach the ticket"
+        assert report.startswith("memory_mb:") and "mysqld" in report and "load average" in report
+        assert "PLAY RECAP" not in report and "ok: [" not in report and "msg:" not in report
+
+
+def test_ansible_report_falls_back_to_the_log_end_instead_of_nothing():
+    from tools import ansible_tool
+    report = ansible_tool.report_from(_COLOURED_REPORT, succeeded=True)
+    assert report and "PLAY RECAP" in report and "\x1b" not in report

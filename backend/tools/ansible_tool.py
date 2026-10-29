@@ -32,6 +32,8 @@ PLAYBOOK_FOR_ALERT = {
 # patterns, and a host named "all" or "*" would widen the run to every server.
 _ONE_HOST = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.\-]*$")
 _FINISHED = {"success", "error", "stopped", "rejected"}
+# Semaphore's API returns Ansible's colour codes ("\x1b[0;32m"); its web page hides them.
+_COLOUR = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 RUN_SECONDS = 120
 POLL_SECONDS = 2
 REPORT_CHARS = 3000
@@ -101,18 +103,21 @@ class AnsibleClient:
 
 def report_from(lines: list, succeeded: bool) -> str:
     """What goes into the ticket: the Report task's message on success, the end
-    of the log on failure (where Ansible says why, e.g. UNREACHABLE)."""
+    of the log on failure (where Ansible says why, e.g. UNREACHABLE), and on a
+    success whose Report cannot be found, so the note is never silently empty."""
+    lines = [_COLOUR.sub("", part).rstrip() for line in lines for part in str(line).split("\n")]
+    tail = "\n".join(lines[-FAILURE_LINES:]).strip("\n")[:REPORT_CHARS]
     if not succeeded:
-        return "\n".join(line.rstrip() for line in lines[-FAILURE_LINES:])[:REPORT_CHARS]
+        return tail
     keep, inside = [], False
     for line in lines:
-        if line.startswith("TASK [Report]"):
+        if "TASK [Report]" in line:
             inside = True
         elif inside and line.startswith("PLAY RECAP"):
             break
         elif inside and line.strip() not in ("", "msg:") and not line.lstrip().startswith("ok: ["):
-            keep.append(line.rstrip())
-    return textwrap.dedent("\n".join(keep))[:REPORT_CHARS]
+            keep.append(line)
+    return textwrap.dedent("\n".join(keep))[:REPORT_CHARS] or tail
 
 
 def run_ansible(playbook: str, host: str, client=None, dry_run: bool = False) -> dict:
