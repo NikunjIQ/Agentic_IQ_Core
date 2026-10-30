@@ -1,7 +1,7 @@
 # Ansible bottlenecks
 
 Everything that can stall the Ansible work, worked through one at a time. Setup steps are in
-[Ansible_Setup.md](Ansible_Setup.md). Update **Status** as each one is settled.
+[DEPLOYMENT.md](../DEPLOYMENT.md). Update **Status** as each one is settled.
 
 Phases referred to below:
 0 Ansible server · 1 reach the VMs · 2 playbooks · 3 IQ Core client · 4 dry run on real
@@ -107,13 +107,13 @@ tickets · 5 go live · 6 harness permissions.
 - **Blocks:** nothing; it's a standing risk, accepted on 2026-10-29 to keep it to one VM.
 - **Plan:** `iqdiag` has no sudo, port 3000 is open to the LAN only, the admin password is
   changed after first login, and `.env` stays readable by root only.
-- **Status:** Partly handled by setup steps 3, 5 and 7.
+- **Status:** Partly handled by DEPLOYMENT.md 2.2, 2.4 and Part 3.
 
 ## B12. Docker network packet size (MTU)
 - **Problem:** VM 152's network (`ens3`) uses MTU 1450, Docker's networks 1500. HTTPS from the
   Semaphore container hung, and the first run failed with `Connection reset by peer` on the
   `git clone` from GitHub.
 - **Blocks:** phase 2 (Semaphore could not fetch playbooks).
-- **Plan:** set the Semaphore network's MTU to 1450 in `docker-compose.yml` (setup step 4).
+- **Plan:** set the Semaphore network's MTU to 1450 in `docker-compose.yml` (DEPLOYMENT.md 2.3).
 - **Status:** Solved 2026-10-29. The other Docker networks on VM 152 (Zammad, Zabbix) are
   still on 1500 and may hit the same problem on large outgoing HTTPS; not checked.

@@ -124,6 +124,9 @@ raise a ticket) and Ceph↔Zammad has no join key at all.
 
 ## Setup
 
+Deploying to a server, with Zammad ticket assist and Ansible diagnostics: follow
+[DEPLOYMENT.md](DEPLOYMENT.md). This section covers running it locally.
+
 ### Requirements
 
 - Python 3.10+

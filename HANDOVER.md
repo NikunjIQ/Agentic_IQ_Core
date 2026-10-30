@@ -582,6 +582,9 @@ while the app runs). Service secrets show as ciphertext by design.
 
 ### Ticket assist (the only write) — Zammad-side setup
 
+The current, step-by-step version (several Zammads, Ansible) is
+[DEPLOYMENT.md](DEPLOYMENT.md) Part 4. The notes below record why each step exists.
+
 Code: `backend/agent/ticket_assist.py`, `ZammadClient.add_note/add_tag`,
 `POST /hooks/zammad/ticket-created`. Off by default; see the README section.
 
