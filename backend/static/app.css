@@ -212,6 +212,7 @@ body::before {
   padding: 6px 12px;
   border-radius: 6px;
   cursor: pointer;
+  white-space: nowrap;
   transition: color 160ms var(--ease), background 160ms var(--ease);
 }
 .tab:hover { color: var(--ink); background: var(--surface-2); }
@@ -595,7 +596,7 @@ label .lab {
   font-weight: 600;
   margin-bottom: 7px;
 }
-input[type="text"], input[type="password"], input[type="email"], input[type="number"] {
+input[type="text"], input[type="password"], input[type="email"], input[type="number"], select {
   width: 100%;
   font: inherit;
   font-size: 13.5px;
@@ -854,6 +855,25 @@ tbody tr {
 .users-table thead th { cursor: default; }
 .users-table thead th:hover { color: var(--muted); }
 td.neg { color: var(--red-ink); }
+
+/* ---------------------------------------------------------- ticket assist */
+#page-assist .card { margin-bottom: 20px; }
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 18px 24px;
+  margin: 16px 0 22px;
+}
+.checks { display: grid; gap: 8px; align-content: end; }
+label.check { display: flex; gap: 8px; align-items: center; font-size: 13px; color: var(--ink); }
+input[readonly] { color: var(--muted); }
+.row-actions { display: flex; gap: 6px; justify-content: flex-end; white-space: nowrap; }
+.setup-row { display: grid; grid-template-columns: 9rem 1fr auto; gap: 10px; align-items: center; margin: 10px 0; }
+.setup-row .lab { margin: 0; }
+.setup-row input { font-family: var(--mono); font-size: 12.5px; }
+.setup-steps { font-size: 13px; color: var(--ink); margin: 14px 0 0; padding-left: 20px; line-height: 1.7; }
+.setup-steps code { font-family: var(--mono); font-size: 12px; }
+@media (max-width: 720px) { .setup-row { grid-template-columns: 1fr; } }
 
 @media (max-width: 720px) { .user-chip { display: none; } }
 

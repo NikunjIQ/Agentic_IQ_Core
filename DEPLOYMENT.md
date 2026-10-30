@@ -469,10 +469,25 @@ only the switch lives in the second service's `env`.
 
 IQ Core stores each Zammad as a **connection** in its database (token and webhook
 secret encrypted), with its own webhook path, mode, daily limit and Ansible switch.
-Until the admin page exists, connections are managed through the admin API on the IQ
-Core VM. Do **4.1** in the Zammad first.
+Do **4.1** in the Zammad first.
 
-Sign in as an IQ Core admin (expect a reply containing `"ok":true`):
+**On the page (recommended).** Sign in to IQ Core as an admin → **Ticket assist** tab:
+
+1. **Add a Zammad:** name (e.g. `zammad183`), Zammad URL with `http://`, IQ Core
+   Assist's token, Suggestions **Dry run**, daily limit, and tick **Allow Ansible
+   diagnostics** if its tickets may use Ansible. **Save**.
+2. A **"Connect … in Zammad"** box appears with the **Endpoint** and **Signature token**
+   (copy buttons) and the webhook/trigger steps. **Copy the token now**: it is not shown
+   again. If the endpoint shows an address Zammad cannot reach (e.g. `localhost`), use
+   the IQ Core VM's IP with the same path.
+3. **Test** on the row signs in to that Zammad as IQ Core Assist and shows the result.
+4. Do **4.3** in the Zammad with that endpoint and token, then test with **4.5** (the log
+   line carries `"zammad": "<name>"`).
+5. **Edit** → Suggestions **Write** → **Save** to go live. A blank token keeps the stored
+   one; **Issue a new webhook secret** gives a fresh one (update the Zammad webhook after).
+   **Delete** removes it; that Zammad's webhook is then refused.
+
+**Or through the API**, from the IQ Core VM. Sign in as an IQ Core admin (expect a reply containing `"ok":true`):
 
 ```bash
 read -p "IQ Core admin username: " U; IFS= read -rs -p "Password: " P; echo; curl -s -c /tmp/iq.cookie -H 'Content-Type: application/json' -d "{\"username\":\"$U\",\"password\":\"$P\"}" http://localhost:8000/auth/login; echo; unset P

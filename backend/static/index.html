@@ -57,6 +57,7 @@
     <button class="tab" data-page="dashboard" aria-current="page">Dashboard</button>
     <button class="tab" data-page="chat">Chat</button>
     <button class="tab" data-page="connections">Connections</button>
+    <button class="tab" data-page="assist" data-admin hidden>Ticket assist</button>
     <button class="tab" data-page="users" data-admin hidden>Users</button>
   </nav>
   <div class="account">
@@ -160,6 +161,66 @@
   </form>
   <div class="results" id="results"></div>
   <p class="footnote" id="config-path"></p>
+</main>
+
+<!-- --------------------------------------------------------- ticket assist -->
+<main class="page" id="page-assist" hidden>
+  <h1>Ticket assist</h1>
+  <p class="lede">
+    Every Zammad whose new Zabbix tickets get an IQ Core suggestion, and, where
+    allowed, read-only Ansible diagnostics. Each one calls its own webhook with
+    its own secret. Tokens and secrets are stored encrypted and never shown again
+    after you save them.
+  </p>
+  <div id="assist-status"></div>
+  <div class="card">
+    <div class="tablewrap">
+      <table class="users-table">
+        <thead><tr>
+          <th>Name</th><th>Zammad</th><th>Suggestions</th><th>Daily limit</th>
+          <th>Ansible</th><th>Updated</th><th></th>
+        </tr></thead>
+        <tbody id="assist-body"></tbody>
+      </table>
+    </div>
+    <p class="footnote" id="assist-empty" hidden>No Zammad connected yet. Add one below.</p>
+  </div>
+
+  <div class="card" id="assist-setup" hidden></div>
+
+  <div class="card">
+    <span class="card-title" id="assist-form-title">Add a Zammad</span>
+    <form id="assist-form" autocomplete="off">
+      <div class="form-grid">
+        <label><span class="lab">Name</span>
+          <input type="text" name="name" required placeholder="zammad183"
+                 pattern="[a-z0-9][a-z0-9\-]{0,31}"
+                 title="Lowercase letters, digits and dashes, up to 32 characters"></label>
+        <label><span class="lab">Zammad URL</span>
+          <input type="text" name="url" required placeholder="http://192.168.1.183:8082"></label>
+        <label><span class="lab">IQ Core Assist token</span>
+          <input type="password" name="write_token" placeholder="ticket.agent token"></label>
+        <label><span class="lab">Suggestions</span>
+          <select name="assist_mode">
+            <option value="off">Off</option>
+            <option value="dry_run" selected>Dry run (log only)</option>
+            <option value="write">Write to tickets</option>
+          </select></label>
+        <label><span class="lab">Daily limit</span>
+          <input type="number" name="daily_limit" min="0" max="10000" value="40"></label>
+        <div class="checks">
+          <label class="check"><input type="checkbox" name="ansible_enabled">
+            Allow Ansible diagnostics</label>
+          <label class="check" id="assist-new-secret" hidden><input type="checkbox" name="new_secret">
+            Issue a new webhook secret</label>
+        </div>
+      </div>
+      <div class="actions">
+        <button class="btn" type="submit" id="assist-save">Save</button>
+        <button class="btn ghost" type="button" id="assist-cancel" hidden>Cancel</button>
+      </div>
+    </form>
+  </div>
 </main>
 
 <!-- ----------------------------------------------------------------- users -->

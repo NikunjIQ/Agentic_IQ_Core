@@ -851,7 +851,9 @@ async function post(path, body, busyLabel) {
 
 function show(page) {
   // The server refuses /admin to anyone else; this just avoids a dead page.
-  if (page === "users" && !(state.me && state.me.role === "admin")) page = "dashboard";
+  if ((page === "users" || page === "assist") && !(state.me && state.me.role === "admin")) {
+    page = "dashboard";
+  }
   if (!$("page-" + page)) page = "dashboard";
   for (const tab of document.querySelectorAll(".tab[data-page]")) {
     const on = tab.dataset.page === page;
@@ -862,9 +864,11 @@ function show(page) {
   $("page-chat").hidden = page !== "chat";
   $("page-connections").hidden = page !== "connections";
   $("page-users").hidden = page !== "users";
+  $("page-assist").hidden = page !== "assist";
   $("composer").hidden = page !== "chat";
   if (page === "connections") loadConfig();
   if (page === "users") loadUsers();
+  if (page === "assist") loadAssist();
   // After un-hiding: a chart drawn into a hidden box has no size.
   if (page === "dashboard") Dashboard.open(); else Dashboard.close();
   if (location.hash.slice(1) !== page) location.hash = page;
@@ -1137,6 +1141,218 @@ $("new-chat").addEventListener("click", newConversation);
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && !$("drawer").hidden) closeDrawer();
 });
+
+/* --------------------------------------------------------- ticket assist */
+/* Admin only: the Zammads that send tickets to IQ Core. Tokens and secrets never
+   come back from the server; the one exception is a webhook secret in the reply
+   that created it, shown once in the setup box. */
+
+const ASSIST_MODES = { off: "Off", dry_run: "Dry run", write: "Write" };
+let assistEditing = null;   // the connection in the form, or null when adding
+
+function assistNote(text, kind) {
+  const status = $("assist-status");
+  status.innerHTML = "";
+  if (text) status.appendChild(el("div", "note" + (kind ? " " + kind : ""), text));
+}
+
+const detailOf = (out) => typeof out.detail === "string" ? out.detail
+  : (out.detail && out.detail[0] && out.detail[0].msg) || "Could not save.";
+
+async function loadAssist() {
+  let data;
+  try {
+    const res = await api("/admin/zammads");
+    if (res.status === 403) { show("dashboard"); return; }
+    data = await res.json();
+  } catch (e) {
+    return;
+  }
+  const body = $("assist-body");
+  body.innerHTML = "";
+  $("assist-empty").hidden = data.zammads.length > 0;
+  data.zammads.forEach((z, i) => {
+    const row = el("tr");
+    row.style.setProperty("--i", Math.min(i, 18));
+    row.appendChild(el("td", null, z.name));
+    row.appendChild(el("td", null, z.url));
+    const mode = el("td");
+    mode.appendChild(el("span", "tag" + ({ write: " green", dry_run: " yellow" }[z.assist_mode] || ""),
+      ASSIST_MODES[z.assist_mode] || z.assist_mode));
+    row.appendChild(mode);
+    row.appendChild(el("td", "num", String(z.daily_limit)));
+    const ansible = el("td");
+    ansible.appendChild(el("span", "tag" + (z.ansible_enabled ? " blue" : ""),
+      z.ansible_enabled ? "Allowed" : "Off"));
+    row.appendChild(ansible);
+    row.appendChild(el("td", null, ago(z.updated_at)));
+    const box = el("div", "row-actions");
+    for (const [label, run] of [["Test", (b) => testAssist(z.name, b)],
+                                ["Edit", () => editAssist(z)],
+                                ["Delete", (b) => deleteAssist(z.name, b)]]) {
+      const b = el("button", "btn ghost small", label);
+      b.type = "button";
+      b.addEventListener("click", () => run(b));
+      box.appendChild(b);
+    }
+    const act = el("td");
+    act.appendChild(box);
+    row.appendChild(act);
+    body.appendChild(row);
+  });
+}
+
+function resetAssistForm() {
+  const form = $("assist-form");
+  form.reset();
+  form.elements.name.readOnly = false;
+  form.elements.write_token.placeholder = "ticket.agent token";
+  $("assist-form-title").textContent = "Add a Zammad";
+  $("assist-new-secret").hidden = $("assist-cancel").hidden = true;
+  assistEditing = null;
+}
+
+function editAssist(z) {
+  const form = $("assist-form");
+  resetAssistForm();
+  assistEditing = z.name;
+  form.elements.name.value = z.name;
+  form.elements.name.readOnly = true;
+  form.elements.url.value = z.url;
+  form.elements.write_token.placeholder = "unchanged — leave blank to keep";
+  form.elements.assist_mode.value = z.assist_mode;
+  form.elements.daily_limit.value = z.daily_limit;
+  form.elements.ansible_enabled.checked = z.ansible_enabled;
+  $("assist-form-title").textContent = "Edit " + z.name;
+  $("assist-new-secret").hidden = $("assist-cancel").hidden = false;
+  form.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+async function saveAssist(e) {
+  e.preventDefault();
+  const form = $("assist-form");
+  const name = form.elements.name.value.trim().toLowerCase();
+  if (!assistEditing && !form.elements.write_token.value.trim()) {
+    assistNote("A new Zammad needs IQ Core Assist's token.", "bad");
+    return;
+  }
+  $("assist-save").disabled = true;
+  try {
+    const res = await api("/admin/zammads/" + encodeURIComponent(name), {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        url: form.elements.url.value.trim(),
+        write_token: form.elements.write_token.value.trim(),
+        assist_mode: form.elements.assist_mode.value,
+        daily_limit: Number(form.elements.daily_limit.value),
+        ansible_enabled: form.elements.ansible_enabled.checked,
+        new_secret: form.elements.new_secret.checked,
+      }),
+    });
+    const out = await res.json();
+    if (!res.ok) throw new Error(detailOf(out));
+    assistNote("Saved " + out.name + ".", "ok");
+    if (out.webhook_secret) showSetup(out);
+    resetAssistForm();
+    loadAssist();
+  } catch (err) {
+    if (err.message !== "Signed out") assistNote(err.message, "bad");
+  } finally {
+    $("assist-save").disabled = false;
+  }
+}
+
+async function testAssist(name, button) {
+  button.disabled = true;
+  assistNote("Signing in to " + name + "…");
+  try {
+    const out = await (await api("/admin/zammads/" + encodeURIComponent(name) + "/test",
+      { method: "POST" })).json();
+    assistNote(out.ok ? name + ": signed in as " + (out.user || "IQ Core Assist") + "."
+                      : name + ": " + (out.error || out.detail || "failed"),
+               out.ok ? "ok" : "bad");
+  } catch (err) {
+    if (err.message !== "Signed out") assistNote(err.message, "bad");
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function deleteAssist(name, button) {
+  if (!confirm("Remove " + name + "? Its Zammad webhook will be refused until it is added again.")) return;
+  button.disabled = true;
+  try {
+    const res = await api("/admin/zammads/" + encodeURIComponent(name), { method: "DELETE" });
+    if (!res.ok) throw new Error(detailOf(await res.json()));
+    assistNote("Removed " + name + ".", "ok");
+    if (assistEditing === name) resetAssistForm();
+    $("assist-setup").hidden = true;
+    loadAssist();
+  } catch (err) {
+    if (err.message !== "Signed out") assistNote(err.message, "bad");
+    button.disabled = false;
+  }
+}
+
+/* The webhook address and secret to paste into Zammad. Built with textContent
+   and input values, never innerHTML, since it carries a secret. */
+function showSetup(saved) {
+  const box = $("assist-setup");
+  box.innerHTML = "";
+  box.appendChild(el("span", "card-title", "Connect " + saved.name + " in Zammad"));
+  box.appendChild(el("div", "note", "Copy the signature token now: it is not shown again. " +
+    "Lost it? Edit the Zammad and tick “Issue a new webhook secret”."));
+  for (const [label, value] of [["Endpoint", location.origin + saved.webhook_path],
+                                ["Signature token", saved.webhook_secret]]) {
+    const row = el("div", "setup-row");
+    row.appendChild(el("span", "lab", label));
+    const input = el("input");
+    input.type = "text";
+    input.readOnly = true;
+    input.value = value;
+    row.appendChild(input);
+    const copy = el("button", "btn ghost small", "Copy");
+    copy.type = "button";
+    copy.addEventListener("click", () => copyField(input, copy));
+    row.appendChild(copy);
+    box.appendChild(row);
+  }
+  const steps = el("ol", "setup-steps");
+  for (const text of [
+    "Webhook (Admin → Webhook → New): name “IQ Core ticket assist”, the endpoint and signature token above, custom payload off.",
+    "Trigger (Admin → Trigger → New): activated by Action; conditions “Action is created” and “Tags contains one not iqcore-suggested”; execute the webhook.",
+    "IQ Core Assist needs READ and CHANGE on every group Zabbix tickets land in.",
+    "If Zammad reaches IQ Core on a different address than this page, use that address in the endpoint.",
+    "Send a test ticket while Suggestions is “Dry run”, then switch it to “Write”.",
+  ]) steps.appendChild(el("li", null, text));
+  box.appendChild(steps);
+  const done = el("button", "btn ghost small", "Done");
+  done.type = "button";
+  done.addEventListener("click", () => { box.hidden = true; box.innerHTML = ""; });
+  const actions = el("div", "actions");
+  actions.style.marginTop = "16px";
+  actions.appendChild(done);
+  box.appendChild(actions);
+  box.hidden = false;
+  box.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+// navigator.clipboard only exists on HTTPS or localhost; over plain HTTP the
+// older execCommand still copies a selected field.
+async function copyField(input, button) {
+  try {
+    await navigator.clipboard.writeText(input.value);
+  } catch (e) {
+    input.select();
+    document.execCommand("copy");
+  }
+  button.textContent = "Copied";
+  setTimeout(() => { button.textContent = "Copy"; }, 1500);
+}
+
+$("assist-form").addEventListener("submit", saveAssist);
+$("assist-cancel").addEventListener("click", resetAssistForm);
 
 /* ----------------------------------------------------------------- users */
 /* Admin only: every account's allocation and spend. The server enforces it
