@@ -36,6 +36,7 @@ _FINISHED = {"success", "error", "stopped", "rejected"}
 _COLOUR = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 RUN_SECONDS = 120
 POLL_SECONDS = 2
+OUTPUT_RETRIES = 5
 REPORT_CHARS = 3000
 FAILURE_LINES = 15
 
@@ -149,5 +150,13 @@ def run_ansible(playbook: str, host: str, client=None, dry_run: bool = False) ->
         time.sleep(POLL_SECONDS)
     else:
         status = "timed out"
+    # Semaphore marks a task finished a moment before its last output lines are
+    # stored; PLAY RECAP is Ansible's final block, so wait for it.
+    lines = client.output(task_id)
+    for _ in range(OUTPUT_RETRIES):
+        if status not in _FINISHED or any("PLAY RECAP" in str(line) for line in lines):
+            break
+        time.sleep(POLL_SECONDS)
+        lines = client.output(task_id)
     return {**found, "task_id": task_id, "status": status,
-            "report": report_from(client.output(task_id), status == "success")}
+            "report": report_from(lines, status == "success")}

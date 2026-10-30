@@ -2493,3 +2493,23 @@ def test_ansible_report_falls_back_to_the_log_end_instead_of_nothing():
     from tools import ansible_tool
     report = ansible_tool.report_from(_COLOURED_REPORT, succeeded=True)
     assert report and "PLAY RECAP" in report and "\x1b" not in report
+
+
+def test_ansible_waits_for_output_semaphore_has_not_stored_yet(monkeypatch):
+    """Task #5 (ticket 165 on Zammad 183) was 'success' while its output still
+    ended at 'Processes by memory', so the note got raw log lines."""
+    from tools import ansible_tool
+    monkeypatch.setattr(ansible_tool.time, "sleep", lambda seconds: None)
+    partial = _ANSIBLE_LOG[:3]
+
+    class _Late(_FakeAnsible):
+        reads = 0
+
+        def output(self, task_id):
+            self.reads += 1
+            return partial if self.reads < 3 else self.log
+
+    client = _Late(statuses=("success",))
+    result = ansible_tool.run_ansible("Top processes", "192.168.1.163", client)
+    assert client.reads == 3
+    assert result["report"].startswith("memory_mb:") and "TASK [" not in result["report"]
