@@ -35,6 +35,8 @@ _BODY_PATTERNS = {
     "event_id": re.compile(r"Original problem ID:\s*(\d+)", re.I),
     "problem_name": re.compile(r"Problem name:\s*(.+)", re.I),
     "host": re.compile(r"Host:\s*(.+)", re.I),
+    # Only some Zabbix message templates carry it (Zammad 183's does, 205's does not).
+    "ip": re.compile(r"IP Address:\s*(\d{1,3}(?:\.\d{1,3}){3})", re.I),
     "severity": re.compile(r"Severity:\s*(\w+)", re.I),
     "started_at": re.compile(r"Problem started at\s*([\d:]+)\s*on\s*([\d.]+)", re.I),
     "trigger_id": re.compile(r"triggerid=(\d+)", re.I),

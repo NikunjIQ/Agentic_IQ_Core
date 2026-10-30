@@ -217,7 +217,9 @@ def diagnose(parsed: dict) -> dict:
     playbook = ansible_tool.playbook_for(parsed.get("problem_name", ""))
     if current == "off" or not playbook:
         return {}
-    host = parsed.get("host", "")
+    # The IP when the ticket has one: Semaphore's inventory lists servers by IP,
+    # while Zabbix's host name ("Prachi-VM", "Nikunj VM") often matches nothing.
+    host = parsed.get("ip") or parsed.get("host", "")
     try:
         return ansible_tool.run_ansible(playbook, host, dry_run=current == "dry_run")
     except Exception as exc:

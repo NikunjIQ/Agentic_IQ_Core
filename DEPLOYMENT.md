@@ -320,9 +320,10 @@ sudo chown iqdiag:iqdiag /home/iqdiag/.ssh/authorized_keys && sudo chmod 600 /ho
 ```
 
 **3.2 In Semaphore**, add the server's IP as a new line under `[linux]` in the `linux`
-inventory. Use the exact name Zabbix shows as the ticket's `Host:`. If Zabbix uses a
-one-word name instead of the IP, add `thatname ansible_host=<IP>`. Names with spaces
-cannot be used.
+inventory. When the ticket carries an `IP Address:` line (Zammad 183's Zabbix template
+does), IQ Core gives Ansible that IP, so the IP line is all you need. When it does not
+(205's template), IQ Core uses the ticket's `Host:`: if that is a one-word name instead
+of the IP, also add `thatname ansible_host=<IP>`. Names with spaces cannot be used.
 
 **3.3 Test by hand** in Semaphore: `Top processes` → **Run** → Limit = the IP. It should
 end with a `Report` task (load, memory, top processes) and `changed=0`.

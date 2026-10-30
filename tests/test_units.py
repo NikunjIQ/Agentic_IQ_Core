@@ -2638,3 +2638,35 @@ def test_zammad_admin_api_is_admin_only_and_never_returns_the_token():
         assert admin.put("/admin/zammads/z183", json={"url": "nope"}).status_code == 400
         assert admin.delete("/admin/zammads/z183").json()["ok"]
         assert admin.delete("/admin/zammads/z183").status_code == 404
+
+
+# A real Zabbix ticket from Zammad 183 (2026-10-30): the host is a name, the IP
+# comes later. Ansible was skipped because only "Prachi-VM" was read.
+_ZAMMAD183_BODY = (
+    "Problem started at 13:20:14 on 2026.10.30\n"
+    "Problem name: Linux: Load average is too high (per CPU load over 1.5 for 5m)\n"
+    "Host: Prachi-VM\nSeverity: Average\n"
+    "Operational data: Load averages(1m 5m 15m): (67.134766 44.020508 26.942383), # of CPUs: 16\n"
+    "Original problem ID: 379113\n\nHost: Prachi-VM\nIP Address: 192.168.1.163")
+
+
+def test_zabbix_ticket_ip_address_is_read_when_present():
+    from tools.correlation import parse_zabbix_ticket_body
+    parsed = parse_zabbix_ticket_body(_ZAMMAD183_BODY)
+    assert parsed["host"] == "Prachi-VM" and parsed["ip"] == "192.168.1.163"
+    assert parsed["event_id"] == "379113"
+    assert "ip" not in parse_zabbix_ticket_body(_ZABBIX_BODY), "205's template has no IP line"
+
+
+def test_ansible_gets_the_ticket_ip_not_the_zabbix_name(monkeypatch):
+    from agent import ticket_assist
+    from tools import ansible_tool
+    ticket_assist._reset()
+    hosts = []
+    monkeypatch.setattr(ansible_tool, "run_ansible", lambda playbook, host, dry_run=False:
+                        hosts.append(host) or {"playbook": playbook, "host": host,
+                                               "status": "success", "report": "top_cpu: sh"})
+    record = _assist("write", _FakeZammad(body=_ZAMMAD183_BODY), ANSIBLE_MODE="run")
+    assert hosts == ["192.168.1.163"]
+    assert record["host"] == "Prachi-VM", "the log keeps Zabbix's name for people"
+    assert record["ansible"]["status"] == "success"

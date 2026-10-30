@@ -15,7 +15,7 @@ tickets · 5 go live · 6 harness permissions.
 - **Blocks:** phase 3.
 - **Plan:** key the inventory by IP. IQ Core looks up the host's IP from Zabbix
   (`host.get` with interfaces) instead of trusting the name in the ticket text.
-- **Status:** Partly handled. `tools/ansible_tool.py` accepts only a host that is one plain name and appears exactly in the template's inventory, so a ticket whose host is a Zabbix display name (`Nikunj VM`) is skipped and logged. Looking the IP up in Zabbix is still to do.
+- **Status:** Mostly handled. Since 2026-10-30, a ticket's `IP Address:` line (present in Zammad 183's Zabbix template) is what Ansible gets, so IP-only inventories work for those tickets. Tickets without that line (205's template) still use `Host:` and need an inventory alias or are skipped and logged. Adding `{HOST.IP}` to 205's Zabbix message template would close it without code.
 
 ## B2. The tickets we get are mostly not CPU
 - **Problem:** in the 20-ticket review sample, 1 was high load. Most were Zabbix's own internal
