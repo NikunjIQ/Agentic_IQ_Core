@@ -465,6 +465,55 @@ sudo systemctl daemon-reload && sudo systemctl enable --now iqcore-colleague && 
 Ansible settings (`ANSIBLE_URL`, `ANSIBLE_TOKEN`) are read from the main `backend/.env`;
 only the switch lives in the second service's `env`.
 
+### 4c. Any number of Zammads, one service (replaces 4b)
+
+IQ Core stores each Zammad as a **connection** in its database (token and webhook
+secret encrypted), with its own webhook path, mode, daily limit and Ansible switch.
+Until the admin page exists, connections are managed through the admin API on the IQ
+Core VM. Do **4.1** in the Zammad first.
+
+Sign in as an IQ Core admin (expect a reply containing `"ok":true`):
+
+```bash
+read -p "IQ Core admin username: " U; IFS= read -rs -p "Password: " P; echo; curl -s -c /tmp/iq.cookie -H 'Content-Type: application/json' -d "{\"username\":\"$U\",\"password\":\"$P\"}" http://localhost:8000/auth/login; echo; unset P
+```
+
+Add the connection. The reply shows its `webhook_path` and, **this once**, its
+`webhook_secret`:
+
+```bash
+read -p "Connection name (e.g. zammad183): " N; read -p "Zammad URL, with http://: " URL; IFS= read -rs -p "Zammad token: " T; echo; curl -s -b /tmp/iq.cookie -X PUT -H 'Content-Type: application/json' -d "{\"url\":\"$URL\",\"write_token\":\"$T\",\"assist_mode\":\"dry_run\",\"daily_limit\":40,\"ansible_enabled\":true}" "http://localhost:8000/admin/zammads/$N"; echo; unset T
+```
+
+Check IQ Core can sign in to it (expect `{"ok":true,"user":"IQ Core Assist"}`):
+
+```bash
+curl -s -b /tmp/iq.cookie -X POST "http://localhost:8000/admin/zammads/$N/test"; echo
+```
+
+In the Zammad, do **4.3** with endpoint `http://<IQ Core IP>:8000` + the `webhook_path`
+and the `webhook_secret` from the reply. Test with **4.5**: the log line carries
+`"zammad": "<name>"`. Go live by repeating the PUT with `"assist_mode":"write"` and an
+empty `"write_token":""` (blank keeps the stored token). Other calls:
+
+| Need | Call |
+|---|---|
+| List connections (never shows tokens or secrets) | `curl -s -b /tmp/iq.cookie http://localhost:8000/admin/zammads` |
+| New webhook secret | the PUT with `"new_secret":true`, then update the Zammad webhook |
+| Remove | `curl -s -b /tmp/iq.cookie -X DELETE http://localhost:8000/admin/zammads/<name>` |
+
+`ANSIBLE_MODE` in `backend/.env` stays the master switch for Ansible; a connection's
+`ansible_enabled` decides whether its tickets may use it.
+
+**Moving a 4b Zammad onto a connection:** add it as above, point its Zammad webhook at
+the new endpoint and secret, send a test ticket, then retire the extra service:
+
+```bash
+sudo systemctl disable --now iqcore-colleague && sudo rm /etc/systemd/system/iqcore-colleague.service && sudo systemctl daemon-reload && rm -rf ~/iqcore-colleague
+```
+
+Clean up the session file when done: `rm -f /tmp/iq.cookie`.
+
 ---
 
 ## Part 5. Turn on Ansible diagnostics

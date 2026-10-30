@@ -248,6 +248,25 @@ async def zammad_ticket_created(request: Request, background: BackgroundTasks):
     return {"status": "accepted", "ticket_id": ticket_id, "mode": ticket_assist.mode()}
 
 
+@app.post("/hooks/zammad/{name}/ticket-created", status_code=202)
+async def zammad_connection_ticket_created(name: str, request: Request,
+                                           background: BackgroundTasks):
+    """The same webhook for one saved Zammad connection, checked against that
+    connection's own secret, so one Zammad can never act as another. An unknown
+    name gets the same 401 as a bad signature: callers learn nothing about names."""
+    raw = await request.body()
+    conn = db.get_zammad(name)
+    if not conn or not ticket_assist.signature_ok(
+            raw, request.headers.get("X-Hub-Signature", ""), conn["webhook_secret"]):
+        raise HTTPException(status_code=401, detail="bad or missing signature")
+    try:
+        ticket_id = int(json.loads(raw)["ticket"]["id"])
+    except (ValueError, KeyError, TypeError):
+        raise HTTPException(status_code=400, detail="payload has no ticket id")
+    background.add_task(ticket_assist.handle, ticket_id, None, conn)
+    return {"status": "accepted", "ticket_id": ticket_id, "mode": conn["assist_mode"]}
+
+
 @app.post("/chat/stream")
 async def chat_stream(request: ChatRequest, user: dict = Depends(current_user)):
     """Same answer as /chat, delivered as it is produced.
@@ -484,6 +503,51 @@ def admin_set_allocation(request: AllocationRequest, user: dict = Depends(admin_
     if not db.set_allocation(request.user_id, round(request.allocated_rupees * 100)):
         raise HTTPException(status_code=404, detail="No such account.")
     return {"ok": True, "balance": db.balance(request.user_id)}
+
+
+# ---------------------------------------------------- ticket assist: Zammads
+class ZammadRequest(BaseModel):
+    url: str
+    write_token: str = ""          # blank on an update keeps the stored token
+    assist_mode: str = "dry_run"
+    daily_limit: int = 40
+    ansible_enabled: bool = False
+    new_secret: bool = False
+
+
+@app.get("/admin/zammads")
+def admin_zammads(user: dict = Depends(admin_user)):
+    """Every connected Zammad. Tokens and secrets never leave the server."""
+    return {"zammads": db.list_zammads()}
+
+
+@app.put("/admin/zammads/{name}")
+def admin_save_zammad(name: str, request: ZammadRequest, user: dict = Depends(admin_user)):
+    """Add or update a Zammad. The webhook secret is in the reply only when new."""
+    try:
+        return ticket_assist.save_connection(name, **request.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.delete("/admin/zammads/{name}")
+def admin_delete_zammad(name: str, user: dict = Depends(admin_user)):
+    if not db.delete_zammad(name):
+        raise HTTPException(status_code=404, detail="No such Zammad.")
+    return {"ok": True}
+
+
+@app.post("/admin/zammads/{name}/test")
+def admin_test_zammad(name: str, user: dict = Depends(admin_user)):
+    """Signs in to that Zammad with the stored token, as ticket assist would."""
+    conn = db.get_zammad(name)
+    if not conn:
+        raise HTTPException(status_code=404, detail="No such Zammad.")
+    try:
+        me = ticket_assist.client_for(conn).get("/api/v1/users/me") or {}
+    except Exception as exc:
+        return {"ok": False, "error": f"{type(exc).__name__}: {str(exc)[:300]}"}
+    return {"ok": True, "user": f"{me.get('firstname', '')} {me.get('lastname', '')}".strip()}
 
 
 

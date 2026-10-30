@@ -468,16 +468,19 @@ class CephDaemonLogClient:
 # Zammad
 # ---------------------------------------------------------------------------
 class ZammadClient:
-    def __init__(self, service_token: str = None):
+    def __init__(self, service_token: str = None, url: str = None):
         # service_token: act as one fixed Zammad identity instead of the signed-in
         # user. Ticket assist runs from a webhook with nobody signed in, so it has
         # no account whose credentials it could borrow — and should not borrow any.
+        # url: which Zammad, when ticket assist serves more than one.
         if service_token:
             _ensure_config()
-            self.url = os.getenv("ZAMMAD_URL", "http://192.168.1.205:8082").rstrip("/")
+            self.url = (url or os.getenv("ZAMMAD_URL", "http://192.168.1.205:8082")).rstrip("/")
             self.headers = {"Authorization": f"Token token={service_token}"}
             self.auth = None
+            self.write_token = service_token
             return
+        self.write_token = os.getenv("ZAMMAD_WRITE_TOKEN", "")
         _ensure_config("Zammad")
         self.url = cfg("ZAMMAD_URL", "http://192.168.1.205:8082").rstrip("/")
         self.headers = {}
@@ -529,11 +532,10 @@ class ZammadClient:
     # a user's own Zammad login (often an admin) is never what creates data, and
     # so writing can be revoked on the Zammad side without breaking anyone's reads.
     def _write(self, path: str, payload: dict) -> dict:
-        token = os.getenv("ZAMMAD_WRITE_TOKEN", "")
-        if not token:
+        if not self.write_token:
             raise RuntimeError("ZAMMAD_WRITE_TOKEN is not set; refusing to write to Zammad")
         res = request("POST", f"{self.url}{path}", system="Zammad", retry=False,
-                      headers={"Authorization": f"Token token={token}"},
+                      headers={"Authorization": f"Token token={self.write_token}"},
                       json=payload, timeout=25)
         res.raise_for_status()
         return res.json() if res.content else {}

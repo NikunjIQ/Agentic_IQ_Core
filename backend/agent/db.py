@@ -116,6 +116,19 @@ CREATE TABLE IF NOT EXISTS feedback (
   rating     INTEGER NOT NULL CHECK (rating IN (-1, 1)),
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Each Zammad that sends tickets to ticket assist. Token and secret are encrypted.
+CREATE TABLE IF NOT EXISTS zammad_connections (
+  name               TEXT PRIMARY KEY,
+  url                TEXT NOT NULL,
+  write_token_enc    TEXT NOT NULL,
+  webhook_secret_enc TEXT NOT NULL,
+  assist_mode        TEXT NOT NULL DEFAULT 'dry_run'
+                     CHECK (assist_mode IN ('off', 'dry_run', 'write')),
+  daily_limit        INTEGER NOT NULL DEFAULT 40 CHECK (daily_limit >= 0),
+  ansible_enabled    INTEGER NOT NULL DEFAULT 0 CHECK (ansible_enabled IN (0, 1)),
+  updated_at         TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 """
 
 
@@ -316,6 +329,55 @@ def save_settings(user_id: int, service: str, values: dict) -> None:
                ON CONFLICT (user_id, service)
                DO UPDATE SET settings = excluded.settings, updated_at = CURRENT_TIMESTAMP""",
             (user_id, service, _seal(values)))
+
+
+# ------------------------------------------------------- zammad connections
+
+def _zammad_row(row, with_secrets: bool) -> dict:
+    out = {"name": row["name"], "url": row["url"], "assist_mode": row["assist_mode"],
+           "daily_limit": row["daily_limit"], "ansible_enabled": bool(row["ansible_enabled"]),
+           "updated_at": row["updated_at"]}
+    if with_secrets:
+        out["write_token"] = _fernet().decrypt(row["write_token_enc"].encode()).decode()
+        out["webhook_secret"] = _fernet().decrypt(row["webhook_secret_enc"].encode()).decode()
+    return out
+
+
+def list_zammads() -> list:
+    """Every connection, without its token or secret: safe to send to a browser."""
+    with tx() as c:
+        rows = c.execute("SELECT * FROM zammad_connections ORDER BY name").fetchall()
+    return [_zammad_row(r, with_secrets=False) for r in rows]
+
+
+def get_zammad(name: str):
+    """One connection with its token and secret decrypted, or None. Server-side only."""
+    with tx() as c:
+        row = c.execute("SELECT * FROM zammad_connections WHERE name = ?", (name,)).fetchone()
+    return _zammad_row(row, with_secrets=True) if row else None
+
+
+def save_zammad(name: str, url: str, write_token: str, webhook_secret: str,
+                assist_mode: str, daily_limit: int, ansible_enabled: bool) -> None:
+    """Insert or replace one connection; the token and secret are encrypted here."""
+    seal = lambda value: _fernet().encrypt(value.encode()).decode()
+    with tx() as c:
+        c.execute(
+            """INSERT INTO zammad_connections (name, url, write_token_enc, webhook_secret_enc,
+                                               assist_mode, daily_limit, ansible_enabled)
+               VALUES (?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT (name) DO UPDATE SET
+                 url = excluded.url, write_token_enc = excluded.write_token_enc,
+                 webhook_secret_enc = excluded.webhook_secret_enc,
+                 assist_mode = excluded.assist_mode, daily_limit = excluded.daily_limit,
+                 ansible_enabled = excluded.ansible_enabled, updated_at = CURRENT_TIMESTAMP""",
+            (name, url, seal(write_token), seal(webhook_secret), assist_mode,
+             int(daily_limit), int(bool(ansible_enabled))))
+
+
+def delete_zammad(name: str) -> bool:
+    with tx() as c:
+        return c.execute("DELETE FROM zammad_connections WHERE name = ?", (name,)).rowcount > 0
 
 
 # --------------------------------------------------------------------- credit

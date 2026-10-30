@@ -3,7 +3,9 @@
 This is the only place IQ Core writes to anything. Zabbix raises a ticket, a
 Zammad trigger calls /hooks/zammad/ticket-created, and this module reads the
 alert, asks the model for a short fix, and adds it to the ticket as an internal
-note for whoever picks the ticket up. When an Ansible playbook covers the alert
+note for whoever picks the ticket up. Each Zammad is a connection (db.py) with its
+own webhook path, secret, mode and limit; the one in .env keeps the original path.
+When an Ansible playbook covers the alert
 (tools/ansible_tool.py, ANSIBLE_MODE), its read-only output is added to the note.
 
 It ships switched off. TICKET_ASSIST_MODE=dry_run does everything except the
@@ -15,16 +17,18 @@ raised 67 tickets in a day against a per-minute token cap.
 """
 
 import os
+import re
 import sys
 import hmac
 import json
 import time
 import hashlib
+import secrets
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
-from agent import telemetry
+from agent import db, telemetry
 from agent.models import REASONING_MODEL
 from tools import ansible_tool
 from tools.clients import ZammadClient
@@ -55,9 +59,12 @@ PROMPT = (
 # today's count and which tickets were handled. The Zammad tag still blocks a
 # second note; move these to a file if restarts become frequent.
 _lock = threading.Lock()
-_handled = set()
-_day = {"date": "", "count": 0}
+_handled = set()          # (zammad name, ticket id): ticket ids repeat across Zammads
+_days = {}                # zammad name -> {"date", "count"}
 _reuse = {}
+
+MODES = ("off", "dry_run", "write")
+_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
 
 
 def _reset():
@@ -65,7 +72,7 @@ def _reset():
     with _lock:
         _handled.clear()
         _reuse.clear()
-        _day.update(date="", count=0)
+        _days.clear()
 
 
 def mode() -> str:
@@ -73,7 +80,57 @@ def mode() -> str:
     return value if value in ("dry_run", "write") else "off"
 
 
-def signature_ok(raw_body: bytes, header: str) -> bool:
+def env_connection() -> dict:
+    """The Zammad configured in .env, served by /hooks/zammad/ticket-created.
+
+    Connections saved through the admin API have their own webhook path; this
+    one keeps the deployments that predate them working unchanged.
+    """
+    return {"name": "env", "url": os.getenv("ZAMMAD_URL", ""),
+            "write_token": os.getenv("ZAMMAD_WRITE_TOKEN", ""),
+            "webhook_secret": os.getenv("ZAMMAD_WEBHOOK_SECRET", ""),
+            "assist_mode": mode(), "daily_limit": _daily_limit(), "ansible_enabled": True}
+
+
+def client_for(conn: dict) -> ZammadClient:
+    """Zammad as that connection's dedicated IQ Core user, for reads and the write."""
+    if not conn.get("write_token"):
+        raise RuntimeError(f"no Zammad token for '{conn.get('name')}' (ZAMMAD_WRITE_TOKEN)")
+    return ZammadClient(service_token=conn["write_token"], url=conn.get("url") or None)
+
+
+def save_connection(name: str, url: str, write_token: str = "", assist_mode: str = "dry_run",
+                    daily_limit: int = 40, ansible_enabled: bool = False,
+                    new_secret: bool = False) -> dict:
+    """Validate and store one Zammad connection.
+
+    A blank token keeps the stored one. The webhook secret is generated here,
+    never typed: on creation, or when new_secret asks for a fresh one. Returns
+    the saved connection without secrets, plus webhook_secret only when it is new.
+    Raises ValueError for anything invalid.
+    """
+    name, url = (name or "").strip().lower(), (url or "").strip().rstrip("/")
+    if not _NAME.match(name) or name == "env":
+        raise ValueError("Name: lowercase letters, digits and dashes, up to 32 characters.")
+    if not url.startswith(("http://", "https://")):
+        raise ValueError("URL must start with http:// or https://")
+    if assist_mode not in MODES:
+        raise ValueError(f"Mode must be one of {', '.join(MODES)}.")
+    if not 0 <= int(daily_limit) <= 10000:
+        raise ValueError("Daily limit must be between 0 and 10000.")
+    existing = db.get_zammad(name)
+    token = (write_token or "").strip() or (existing or {}).get("write_token", "")
+    if not token:
+        raise ValueError("A Zammad token is required for a new connection.")
+    fresh = new_secret or not existing
+    secret = secrets.token_hex(32) if fresh else existing["webhook_secret"]
+    db.save_zammad(name, url, token, secret, assist_mode, int(daily_limit), ansible_enabled)
+    saved = next(z for z in db.list_zammads() if z["name"] == name)
+    return {**saved, "webhook_path": f"/hooks/zammad/{name}/ticket-created",
+            **({"webhook_secret": secret} if fresh else {})}
+
+
+def signature_ok(raw_body: bytes, header: str, secret: str = None) -> bool:
     """True only when Zammad signed this payload with our shared secret.
 
     The API has no authentication of its own, and this endpoint spends tokens
@@ -81,7 +138,7 @@ def signature_ok(raw_body: bytes, header: str) -> bool:
     secret is configured at all. Zammad sends X-Hub-Signature as HMAC-SHA1;
     the optional "sha1=" prefix is accepted either way.
     """
-    secret = os.getenv("ZAMMAD_WEBHOOK_SECRET", "")
+    secret = os.getenv("ZAMMAD_WEBHOOK_SECRET", "") if secret is None else secret
     if not secret or not header:
         return False
     expected = hmac.new(secret.encode(), raw_body, hashlib.sha1).hexdigest()
@@ -119,10 +176,7 @@ def service_client() -> ZammadClient:
     Every other client in the app uses the signed-in user's own credentials. A
     webhook has no signed-in user, so this path has one identity of its own.
     """
-    token = os.getenv("ZAMMAD_WRITE_TOKEN", "")
-    if not token:
-        raise RuntimeError("ZAMMAD_WRITE_TOKEN is not set")
-    return ZammadClient(service_token=token)
+    return client_for(env_connection())
 
 
 def suggest_fix(parsed: dict, body: str) -> str:
@@ -171,15 +225,16 @@ def diagnose(parsed: dict) -> dict:
                 "error": f"{type(exc).__name__}: {str(exc)[:300]}"}
 
 
-def _process(ticket_id: int, client, current_mode: str) -> dict:
+def _process(ticket_id: int, client, conn: dict) -> dict:
+    current_mode = conn["assist_mode"]
     if current_mode == "off":
         return {"outcome": "skipped", "reason": "ticket assist is switched off"}
-    client = client or service_client()
+    client = client or client_for(conn)
 
     with _lock:
-        if ticket_id in _handled:
+        if (conn["name"], ticket_id) in _handled:
             return {"outcome": "skipped", "reason": "already handled in this run"}
-        _handled.add(ticket_id)
+        _handled.add((conn["name"], ticket_id))
 
     ticket = client.ticket(ticket_id)
     if not ticket:
@@ -199,13 +254,14 @@ def _process(ticket_id: int, client, current_mode: str) -> dict:
 
     today = datetime.now(timezone.utc).date().isoformat()
     with _lock:
-        if _day["date"] != today:
-            _day.update(date=today, count=0)
-        if _day["count"] >= _daily_limit():
+        day = _days.setdefault(conn["name"], {"date": "", "count": 0})
+        if day["date"] != today:
+            day.update(date=today, count=0)
+        if day["count"] >= conn["daily_limit"]:
             return {**found, "outcome": "skipped", "reason": "daily limit reached"}
-        _day["count"] += 1
+        day["count"] += 1
 
-    diagnosis = diagnose(parsed)
+    diagnosis = diagnose(parsed) if conn["ansible_enabled"] else {}
     if diagnosis:
         found["ansible"] = {k: v for k, v in diagnosis.items() if k != "report"}
 
@@ -226,13 +282,15 @@ def _process(ticket_id: int, client, current_mode: str) -> dict:
     return {**found, "outcome": "written"}
 
 
-def handle(ticket_id: int, client=None) -> dict:
-    """Process one new ticket and record what happened. Never raises: it runs
-    as a background task, where an exception would vanish unrecorded."""
+def handle(ticket_id: int, client=None, conn: dict = None) -> dict:
+    """Process one new ticket from one Zammad (default: the one in .env) and
+    record what happened. Never raises: it runs as a background task, where an
+    exception would vanish unrecorded."""
+    conn = conn or env_connection()
     record = {"at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-              "ticket_id": ticket_id, "mode": mode()}
+              "zammad": conn["name"], "ticket_id": ticket_id, "mode": conn["assist_mode"]}
     try:
-        record.update(_process(ticket_id, client, record["mode"]))
+        record.update(_process(ticket_id, client, conn))
     except Exception as exc:
         record.update(outcome="error", error=f"{type(exc).__name__}: {str(exc)[:300]}")
     try:

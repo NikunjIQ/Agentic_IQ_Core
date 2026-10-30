@@ -2126,24 +2126,24 @@ def test_zammad_writes_use_their_own_token_and_are_never_retried():
     import os
     import requests
     from tools import clients
-    saved = os.environ.get("ZAMMAD_WRITE_TOKEN")
+    client = clients.ZammadClient(service_token="t")
+    client.write_token = ""
     try:
-        os.environ.pop("ZAMMAD_WRITE_TOKEN", None)
-        try:
-            clients.ZammadClient(service_token="t").add_note(1, "x")
-            assert False, "writing without ZAMMAD_WRITE_TOKEN must refuse"
-        except RuntimeError:
-            pass
-        os.environ["ZAMMAD_WRITE_TOKEN"] = "write-token"
-        fake = _Flaky(requests.exceptions.ReadTimeout("slow"), failures=99)
-        try:
-            _with_fake(fake, lambda: clients.ZammadClient(service_token="t").add_note(1, "x"))
-        except requests.exceptions.ReadTimeout:
-            pass
-        assert fake.calls == 1, f"a write must be sent once, got {fake.calls} attempts"
-    finally:
-        os.environ.pop("ZAMMAD_WRITE_TOKEN", None) if saved is None else os.environ.update(
-            {"ZAMMAD_WRITE_TOKEN": saved})
+        client.add_note(1, "x")
+        assert False, "a client with no write token must refuse"
+    except RuntimeError:
+        pass
+    seen = []
+
+    def timeout(method, url, **kwargs):
+        seen.append(kwargs["headers"]["Authorization"])
+        raise requests.exceptions.ReadTimeout("slow")
+
+    try:
+        _with_fake(timeout, lambda: clients.ZammadClient(service_token="t").add_note(1, "x"))
+    except requests.exceptions.ReadTimeout:
+        pass
+    assert seen == ["Token token=t"], f"one attempt, with the client's own token: {seen}"
 
 
 # --- ansible: IQ Core's first tool that acts on servers -----------------------
@@ -2513,3 +2513,128 @@ def test_ansible_waits_for_output_semaphore_has_not_stored_yet(monkeypatch):
     result = ansible_tool.run_ansible("Top processes", "192.168.1.163", client)
     assert client.reads == 3
     assert result["report"].startswith("memory_mb:") and "TASK [" not in result["report"]
+
+
+# --- ticket assist across several Zammads ------------------------------------
+def test_zammad_connection_is_stored_encrypted_and_secret_shown_once():
+    from agent import ticket_assist
+    with _fresh_db() as (db, _):
+        made = ticket_assist.save_connection("zammad183", "http://192.168.1.183:8082/",
+                                             write_token="tok-183")
+        assert made["url"] == "http://192.168.1.183:8082" and made["assist_mode"] == "dry_run"
+        assert made["webhook_path"] == "/hooks/zammad/zammad183/ticket-created"
+        secret = made["webhook_secret"]
+        assert len(secret) == 64 and "write_token" not in made
+
+        with db.tx() as c:
+            raw = dict(c.execute("SELECT * FROM zammad_connections").fetchone())
+        assert "tok-183" not in str(raw) and secret not in str(raw), "stored in the clear"
+        assert db.list_zammads()[0].keys().isdisjoint({"write_token", "webhook_secret"})
+
+        again = ticket_assist.save_connection("zammad183", "http://192.168.1.183:8082",
+                                              assist_mode="write", daily_limit=5)
+        assert "webhook_secret" not in again, "an update must not re-show the secret"
+        stored = db.get_zammad("zammad183")
+        assert stored["write_token"] == "tok-183" and stored["webhook_secret"] == secret
+        assert stored["assist_mode"] == "write" and stored["daily_limit"] == 5
+
+        rotated = ticket_assist.save_connection("zammad183", "http://192.168.1.183:8082",
+                                                new_secret=True)
+        assert rotated["webhook_secret"] != secret
+        assert db.delete_zammad("zammad183") and db.get_zammad("zammad183") is None
+
+
+def test_zammad_connection_rejects_bad_input():
+    import pytest
+    from agent import ticket_assist
+    with _fresh_db():
+        good = dict(name="z183", url="http://192.168.1.183:8082", write_token="t")
+        for change in ({"name": "Zammad 183"}, {"name": "env"}, {"name": "x" * 33},
+                       {"url": "192.168.1.183:8082"}, {"assist_mode": "live"},
+                       {"daily_limit": -1}, {"write_token": ""}):
+            with pytest.raises(ValueError):
+                ticket_assist.save_connection(**{**good, **change})
+
+
+def _assist_conn(monkeypatch, conn, client, ticket_id=5447):
+    import tempfile
+    from pathlib import Path
+    from agent import ticket_assist
+    monkeypatch.setattr(ticket_assist, "suggest_fix", lambda parsed, body: "- check the uptime")
+    monkeypatch.setattr(ticket_assist, "LOG_PATH", Path(tempfile.mkdtemp()) / "log.jsonl")
+    return ticket_assist.handle(ticket_id, client, conn)
+
+
+def test_ticket_assist_keeps_zammads_apart(monkeypatch):
+    """Ticket ids repeat across Zammads; limits and the Ansible switch are per Zammad."""
+    from agent import ticket_assist
+    from tools import ansible_tool
+    ticket_assist._reset()
+    ran = []
+    monkeypatch.setenv("ANSIBLE_MODE", "run")
+    monkeypatch.setattr(ansible_tool, "run_ansible", lambda playbook, host, dry_run=False:
+                        ran.append(host) or {"playbook": playbook, "host": host,
+                                             "status": "success", "report": "top_cpu: x"})
+    base = {"url": "", "write_token": "t", "webhook_secret": "s", "assist_mode": "write"}
+    prod = {**base, "name": "prod", "daily_limit": 1, "ansible_enabled": True}
+    lab = {**base, "name": "lab", "daily_limit": 5, "ansible_enabled": False}
+
+    a, b = _FakeZammad(body=_LOAD_BODY), _FakeZammad(body=_LOAD_BODY)
+    first = _assist_conn(monkeypatch, prod, a, ticket_id=161)
+    other = _assist_conn(monkeypatch, lab, b, ticket_id=161)
+    assert first["outcome"] == other["outcome"] == "written", "same id, different Zammads"
+    assert first["zammad"] == "prod" and other["zammad"] == "lab"
+    assert ran == ["192.168.1.163"], "Ansible runs only where the connection allows it"
+    assert "diagnostics" in a.writes[1][2] and "diagnostics" not in b.writes[1][2]
+
+    assert _assist_conn(monkeypatch, prod, _FakeZammad(body=_LOAD_BODY), 162)["reason"] == \
+        "daily limit reached"
+    assert _assist_conn(monkeypatch, lab, _FakeZammad(body=_LOAD_BODY), 162)["outcome"] == \
+        "written", "one Zammad's limit must not stop another"
+
+
+def test_connection_webhook_checks_that_connections_own_secret(monkeypatch):
+    import hmac
+    import hashlib
+    from fastapi.testclient import TestClient
+    import main
+    from agent import ticket_assist
+    handled = []
+    monkeypatch.setattr(ticket_assist, "handle",
+                        lambda ticket_id, client=None, conn=None: handled.append((conn["name"], ticket_id)))
+    with _fresh_db():
+        a = ticket_assist.save_connection("alpha", "http://a:1", write_token="ta")["webhook_secret"]
+        b = ticket_assist.save_connection("beta", "http://b:1", write_token="tb")["webhook_secret"]
+        body = b'{"ticket": {"id": 7}}'
+        sign = lambda secret: {"X-Hub-Signature": "sha1=" + hmac.new(
+            secret.encode(), body, hashlib.sha1).hexdigest()}
+        api = TestClient(main.app)
+        assert api.post("/hooks/zammad/alpha/ticket-created", content=body,
+                        headers=sign(a)).status_code == 202
+        assert api.post("/hooks/zammad/alpha/ticket-created", content=body,
+                        headers=sign(b)).status_code == 401, "beta must not act as alpha"
+        assert api.post("/hooks/zammad/nobody/ticket-created", content=body,
+                        headers=sign(a)).status_code == 401
+        assert handled == [("alpha", 7)]
+
+
+def test_zammad_admin_api_is_admin_only_and_never_returns_the_token():
+    from fastapi.testclient import TestClient
+    import main
+    with _fresh_db():
+        admin, user = TestClient(main.app), TestClient(main.app)
+        admin.post("/auth/signup", json={"username": "nikunj", "password": "secret123",
+                                         "email": "n@example.com"})
+        user.post("/auth/signup", json={"username": "priya", "password": "secret456",
+                                        "email": "p@example.com"})
+        body = {"url": "http://192.168.1.183:8082", "write_token": "tok-183"}
+        assert user.put("/admin/zammads/z183", json=body).status_code == 403
+        assert user.get("/admin/zammads").status_code == 403
+
+        made = admin.put("/admin/zammads/z183", json=body).json()
+        assert made["webhook_secret"] and "write_token" not in made
+        listed = admin.get("/admin/zammads").text
+        assert "tok-183" not in listed and made["webhook_secret"] not in listed
+        assert admin.put("/admin/zammads/z183", json={"url": "nope"}).status_code == 400
+        assert admin.delete("/admin/zammads/z183").json()["ok"]
+        assert admin.delete("/admin/zammads/z183").status_code == 404
