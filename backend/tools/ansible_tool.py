@@ -21,11 +21,15 @@ import time
 from tools.clients import request
 
 # Zabbix problem name (lowercase substring) -> Semaphore template name.
+# Zabbix problem name (lowercase substring) -> candidate Semaphore templates, in
+# order. The first whose inventory lists the ticket's host runs, so one alert can
+# mean a Linux playbook on a VM and a switch playbook on a switch.
 PLAYBOOK_FOR_ALERT = {
-    "high cpu utilization": "Top processes",
-    "load average is too high": "Top processes",
-    "high memory utilization": "Top processes",
-    "lack of available memory": "Top processes",
+    "high cpu utilization": ["Top processes", "Aruba health"],
+    "load average is too high": ["Top processes"],
+    "high memory utilization": ["Top processes", "Aruba health"],
+    "lack of available memory": ["Top processes"],
+    "link down": ["Aruba health"],
 }
 
 # One plain host. Ansible's limit reads spaces, commas, colons, * and ! as
@@ -46,10 +50,10 @@ def mode() -> str:
     return value if value in ("dry_run", "run") else "off"
 
 
-def playbook_for(problem_name: str):
-    """The template that diagnoses this alert, or None."""
+def playbook_for(problem_name: str) -> list:
+    """The candidate templates for this alert, or [] when none covers it."""
     text = (problem_name or "").lower()
-    return next((name for key, name in PLAYBOOK_FOR_ALERT.items() if key in text), None)
+    return next((names for key, names in PLAYBOOK_FOR_ALERT.items() if key in text), [])
 
 
 def inventory_hosts(text: str) -> set:
@@ -58,10 +62,13 @@ def inventory_hosts(text: str) -> set:
     shortcut: INI inventories only, no YAML and no host ranges like web[1:3];
     add them if the Semaphore inventory ever uses either.
     """
-    hosts = set()
+    hosts, in_hosts = set(), True
     for line in (text or "").splitlines():
         line = line.strip()
-        if line and not line.startswith(("#", ";", "[")):
+        if line.startswith("["):
+            # [group:vars] holds settings and [group:children] holds group names.
+            in_hosts = not line.rstrip("]").endswith((":vars", ":children"))
+        elif line and in_hosts and not line.startswith(("#", ";")):
             hosts.add(line.split()[0])
     return hosts
 
@@ -121,21 +128,29 @@ def report_from(lines: list, succeeded: bool) -> str:
     return textwrap.dedent("\n".join(keep))[:REPORT_CHARS] or tail
 
 
-def run_ansible(playbook: str, host: str, client=None, dry_run: bool = False) -> dict:
+def run_ansible(playbook, host: str, client=None, dry_run: bool = False) -> dict:
     """Run one approved playbook on one host and return its report.
 
-    Raises ValueError for anything not approved: a host that is not one plain
-    name, a playbook with no template in IQ Core's project, or a host missing
-    from that template's inventory. Nothing has started when it raises.
+    playbook is a template name or a list of candidates; the first whose
+    inventory lists the host is used. Raises ValueError for anything not
+    approved: a host that is not one plain name, no candidate template in IQ
+    Core's project, or a host in none of their inventories. Nothing has
+    started when it raises.
     """
     if not _ONE_HOST.match(host or "") or host.lower() == "all":
         raise ValueError(f"not a single host: {host!r}")
+    names = [playbook] if isinstance(playbook, str) else list(playbook)
     client = client or AnsibleClient()
-    template = next((t for t in client.templates() if t.get("name") == playbook), None)
+    by_name = {t.get("name"): t for t in client.templates()}
+    candidates = [by_name[n] for n in names if n in by_name]
+    if not candidates:
+        raise ValueError(f"no template named {' or '.join(map(repr, names))} in IQ Core's Ansible project")
+    template = next((t for t in candidates
+                     if host in inventory_hosts(client.inventory(t["inventory_id"]))), None)
     if not template:
-        raise ValueError(f"no template named {playbook!r} in IQ Core's Ansible project")
-    if host not in inventory_hosts(client.inventory(template["inventory_id"])):
-        raise ValueError(f"{host} is not in the inventory of {playbook!r}")
+        raise ValueError(f"{host} is not in the inventory of "
+                         f"{' or '.join(repr(t['name']) for t in candidates)}")
+    playbook = template["name"]
 
     found = {"playbook": playbook, "host": host}
     if dry_run:

@@ -328,6 +328,47 @@ of the IP, also add `thatname ansible_host=<IP>`. Names with spaces cannot be us
 **3.3 Test by hand** in Semaphore: `Top processes` → **Run** → Limit = the IP. It should
 end with a `Report` task (load, memory, top processes) and `changed=0`.
 
+### 3b. An Aruba AOS-CX switch
+
+A switch has no Linux shell and no Python, so the Linux playbooks cannot run on it. It
+gets its own login, inventory and template; IQ Core picks the template whose inventory
+lists the ticket's host (`PLAYBOOK_FOR_ALERT` in `backend/tools/ansible_tool.py`).
+
+**3b.1 On the switch**, create a read-only user (the `operators` group can run `show`
+commands and cannot change configuration). It prompts for the password:
+
+```text
+configure terminal
+user iqdiag group operators password
+end
+write memory
+```
+
+**3b.2 In Semaphore:**
+1. **Key Store → New Key:** `aruba-readonly`, type **Login with password**, username
+   `iqdiag`, that password.
+2. **Inventory → New:** name `aruba`, user credentials `aruba-readonly`, type **Static**:
+   ```ini
+   [aruba]
+   192.168.1.80
+
+   [aruba:vars]
+   ansible_connection=ansible.netcommon.network_cli
+   ansible_network_os=arubanetworks.aoscx.aoscx
+   ```
+3. **Task Templates → New:** name **`Aruba health`**, playbook `diag_aruba_health.yml`,
+   inventory `aruba`, repository `iq-playbooks`, environment `default`, **Limit** prompt on.
+4. **Run it by hand** with Limit `192.168.1.80`. Semaphore first installs the Aruba
+   collection from `collections/requirements.yml` (slower the first time).
+
+If the run fails with `paramiko` or `ansible-pylibssh` "not installed", Semaphore's
+container lacks the SSH library network devices need. Semaphore installs Python packages
+listed in `/etc/semaphore/requirements.txt` when it starts:
+
+```bash
+cd /opt/semaphore && sudo docker compose exec -u root semaphore sh -c 'echo paramiko >> /etc/semaphore/requirements.txt' && sudo docker compose restart semaphore
+```
+
 ---
 
 ## Part 4. Connect a Zammad (suggestions)
@@ -569,7 +610,7 @@ and the report, and Semaphore shows a new task.
 | **Update IQ Core** | `cd ~/Agentic_IQ_Core && git pull`, then restart **every** IQ Core service: `sudo systemctl restart iqcore iqcore-colleague`. A running service keeps the old code until restarted. |
 | **Change a setting** | Edit `backend/.env` (or `~/iqcore-colleague/env`), then restart that service. |
 | **Turn a feature off** | `TICKET_ASSIST_MODE=off` or `ANSIBLE_MODE=off`, restart. Or deactivate the trigger in Zammad. |
-| **Add a server** | Part 3. |
+| **Add a server** | Part 3 (Linux) or 3b (Aruba switch). |
 | **Add a playbook** | A teammate adds `diag_<what>.yml` to `iq-playbooks` by pull request (rules in its README) → a Semaphore admin creates a template in `IQ Core diagnostics` with the Limit prompt on → a developer maps the alert to the template name in `PLAYBOOK_FOR_ALERT` and deploys. |
 | **Upgrade Semaphore** | Change the image tag in `/opt/semaphore/docker-compose.yml`, then `cd /opt/semaphore && sudo docker compose pull && sudo docker compose up -d`. |
 | **Back up Semaphore** | `cd /opt/semaphore && sudo docker compose exec -T postgres pg_dump -U semaphore semaphore \| gzip > ~/semaphore-$(date +%F).sql.gz`, plus `/opt/semaphore/.env`. |

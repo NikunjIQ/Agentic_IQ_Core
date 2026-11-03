@@ -2193,10 +2193,12 @@ class _FakeAnsible:
 def test_ansible_picks_a_playbook_only_for_covered_alerts():
     from tools import ansible_tool
     assert ansible_tool.playbook_for(
-        "Linux: Load average is too high (per CPU load over 1.5 for 5m)") == "Top processes"
-    assert ansible_tool.playbook_for("Linux: High CPU utilization (over 90% for 5m)") == "Top processes"
-    assert ansible_tool.playbook_for("Linux: Nikunj VM has been restarted (uptime < 10m)") is None
-    assert ansible_tool.playbook_for("") is None
+        "Linux: Load average is too high (per CPU load over 1.5 for 5m)") == ["Top processes"]
+    assert ansible_tool.playbook_for("Linux: High CPU utilization (over 90% for 5m)") == [
+        "Top processes", "Aruba health"]
+    assert ansible_tool.playbook_for("Interface 1/1/1(): Link down") == ["Aruba health"]
+    assert ansible_tool.playbook_for("Linux: Nikunj VM has been restarted (uptime < 10m)") == []
+    assert ansible_tool.playbook_for("") == []
 
 
 def test_ansible_inventory_reads_the_first_word_of_host_lines():
@@ -2276,13 +2278,13 @@ def test_ticket_assist_adds_the_ansible_report_to_the_note(monkeypatch):
 
     def fake_run(playbook, host, client=None, dry_run=False):
         calls.append((playbook, host, dry_run))
-        return {"playbook": playbook, "host": host, "status": "success",
+        return {"playbook": playbook[0], "host": host, "status": "success",
                 "report": "top_cpu: mysqld"}
 
     monkeypatch.setattr(ansible_tool, "run_ansible", fake_run)
     client = _FakeZammad(body=_LOAD_BODY)
     record = _assist("write", client, ANSIBLE_MODE="run")
-    assert calls == [("Top processes", "192.168.1.163", False)]
+    assert calls == [(["Top processes"], "192.168.1.163", False)]
     note = client.writes[1][2]
     assert note.startswith(ticket_assist.HEADER) and "- check the uptime" in note
     assert "'Top processes' on 192.168.1.163" in note and note.endswith("top_cpu: mysqld")
@@ -2670,3 +2672,46 @@ def test_ansible_gets_the_ticket_ip_not_the_zabbix_name(monkeypatch):
     assert hosts == ["192.168.1.163"]
     assert record["host"] == "Prachi-VM", "the log keeps Zabbix's name for people"
     assert record["ansible"]["status"] == "success"
+
+
+class _FakeAnsibleWithSwitches(_FakeAnsible):
+    """Two templates on two inventories: Linux VMs, and Aruba switches with group vars."""
+
+    def templates(self):
+        return [{"id": 7, "name": "Top processes", "inventory_id": 3},
+                {"id": 9, "name": "Aruba health", "inventory_id": 4}]
+
+    def inventory(self, inventory_id):
+        if inventory_id == 3:
+            return "[linux]\n192.168.1.163\n"
+        return ("[aruba]\n192.168.1.80\n\n[aruba:vars]\n"
+                "ansible_connection=ansible.netcommon.network_cli\n"
+                "ansible_network_os=arubanetworks.aoscx.aoscx\n")
+
+
+def test_ansible_inventory_ignores_group_vars_and_children():
+    from tools import ansible_tool
+    hosts = ansible_tool.inventory_hosts(_FakeAnsibleWithSwitches().inventory(4))
+    assert hosts == {"192.168.1.80"}
+    assert ansible_tool.inventory_hosts("[all:children]\naruba\nlinux\n[linux]\nvm1\n") == {"vm1"}
+
+
+def test_ansible_picks_the_template_whose_inventory_has_the_host(monkeypatch):
+    """One alert, two device kinds: the host's inventory decides the playbook."""
+    from tools import ansible_tool
+    monkeypatch.setattr(ansible_tool.time, "sleep", lambda seconds: None)
+    alert = ansible_tool.playbook_for("High CPU utilization (over 90% for 5m)")
+    for host, template_id, name in (("192.168.1.163", 7, "Top processes"),
+                                    ("192.168.1.80", 9, "Aruba health")):
+        client = _FakeAnsibleWithSwitches()
+        result = ansible_tool.run_ansible(alert, host, client)
+        assert client.started == [(template_id, host)] and result["playbook"] == name
+    client = _FakeAnsibleWithSwitches()
+    import pytest
+    with pytest.raises(ValueError, match="not in the inventory"):
+        ansible_tool.run_ansible(alert, "192.168.1.99", client)
+    assert client.started == []
+    # A candidate with no template yet (e.g. before Semaphore has it) is skipped.
+    only_linux = _FakeAnsible()
+    assert ansible_tool.run_ansible(["Aruba health", "Top processes"], "192.168.1.163",
+                                    only_linux, dry_run=True)["playbook"] == "Top processes"
