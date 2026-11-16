@@ -267,6 +267,11 @@ def find_user(username: str):
         return dict(row) if row else None
 
 
+def set_role(user_id: int, role: str) -> None:
+    with tx() as c:
+        c.execute("UPDATE users SET role = ? WHERE id = ?", (role, user_id))
+
+
 def email_taken(email: str) -> bool:
     with tx() as c:
         return c.execute("SELECT 1 FROM users WHERE email = ?", (email,)).fetchone() is not None
