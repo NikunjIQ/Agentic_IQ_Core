@@ -50,10 +50,50 @@ def test_admin_group_member_becomes_admin(directory):
     assert auth_store.login("ravi", "ravi-pw")["role"] == "admin"
 
 
-def test_local_account_is_not_taken_over_by_a_directory_password(directory):
+def test_local_account_is_not_taken_over_by_a_directory_password(directory, monkeypatch):
+    monkeypatch.setenv("LDAP_ENABLED", "false")  # sign-up is closed while LDAP is on
     assert auth_store.signup("meera", "local-pw", "meera@local.test")["ok"]
+    monkeypatch.setenv("LDAP_ENABLED", "true")
     assert not auth_store.login("meera", "dir-pw")["ok"]
     assert auth_store.login("meera", "local-pw")["ok"]
+
+
+def test_sign_up_closes_while_ldap_is_on(directory):
+    auth_store.login("asha", "asha-pw")  # at least one account exists
+    result = auth_store.signup("squatter", "whatever-pw", "s@local.test")
+    assert not result["ok"] and "directory" in result["error"]
+
+
+def test_switch_off_stops_directory_sign_in(directory, monkeypatch):
+    monkeypatch.setenv("LDAP_ENABLED", "false")
+    assert not auth_store.login("ravi", "ravi-pw")["ok"]
+
+
+def test_connection_test_walks_each_step(directory):
+    import os
+    from agent.config_test import test_ldap
+    cfg = dict(os.environ)
+    assert test_ldap(cfg)["ok"]  # no test user: service account only
+    assert "signs in as admin" in test_ldap({**cfg, "LDAP_TEST_USER": "ravi",
+                                             "LDAP_TEST_PASSWORD": "ravi-pw"})["message"]
+    assert "refused" in test_ldap({**cfg, "LDAP_TEST_USER": "ravi",
+                                   "LDAP_TEST_PASSWORD": "x"})["message"]
+    assert not test_ldap({**cfg, "LDAP_TEST_USER": "ghost"})["ok"]
+    assert "refused the bind" in test_ldap({**cfg, "LDAP_BIND_PASSWORD": "x"})["message"]
+
+
+def test_only_admins_run_the_directory_test():
+    import main
+    assert "LDAP" not in main._testable([], {"role": "user"})
+    assert "LDAP" not in main._testable(["LDAP"], {"role": "user"})
+    assert "LDAP" in main._testable([], {"role": "admin"})
+
+
+def test_test_sign_in_fields_are_never_saved():
+    from agent import config_store
+    for key in ("LDAP_TEST_USER", "LDAP_TEST_PASSWORD"):
+        assert key not in config_store.ALL_KEYS and key not in config_store.SYSTEM_KEYS
+    assert "LDAP_BIND_PASSWORD" in config_store.SYSTEM_KEYS
 
 
 def test_filter_injection_finds_nobody(directory):

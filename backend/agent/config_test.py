@@ -244,6 +244,32 @@ def test_groq(cfg: dict) -> dict:
         return _fail(_describe(exc))
 
 
+def test_ldap(cfg: dict) -> dict:
+    """Service account first, then, if a test username was typed, the same
+    find-and-bind a real sign-in does. Admins only: see main._testable."""
+    from ldap3.core.exceptions import LDAPException
+    from agent import auth_store
+
+    if not str(cfg.get("LDAP_URL", "")).strip():
+        return _ok("not set up, so directory sign-in is off")
+    off = "" if auth_store.ldap_enabled(cfg) else " (sign-in is switched off)"
+    user = str(cfg.get("LDAP_TEST_USER", "")).strip()
+    try:
+        found = auth_store.ldap_check(user, str(cfg.get("LDAP_TEST_PASSWORD", "")), cfg)
+    except LDAPException as exc:
+        return _fail(f"{type(exc).__name__}: {str(exc)[:160]}")
+    if not user:
+        return _ok("service account accepted; type a test username to try a sign-in" + off)
+    if not found["dn"]:
+        return _fail(f"service account accepted, but no single entry has "
+                     f"{cfg.get('LDAP_USER_ATTR') or 'uid'}={user} under the user base DN")
+    if not found["accepted"]:
+        return _fail(f"found {found['dn']}, but the password was "
+                     + ("refused" if cfg.get("LDAP_TEST_PASSWORD") else "not typed"))
+    return _ok(f"{found['dn']} signs in as "
+               f"{'admin' if found['admin'] else 'user'}{off}")
+
+
 TESTS = {
     "Zabbix": test_zabbix,
     "Zammad": test_zammad,
@@ -252,6 +278,7 @@ TESTS = {
     "Ceph container logs": test_ceph_logs,
     "OpenSearch": test_opensearch,
     "Groq": test_groq,
+    "LDAP": test_ldap,
 }
 
 
@@ -259,7 +286,8 @@ def test_all(cfg: dict, systems=None) -> dict:
     """Check each system. Listing a model call is avoided — this costs no tokens."""
     results = {}
     for name, check in TESTS.items():
-        if systems and name not in systems:
+        # None means all; an empty list means none (main._testable can leave nothing).
+        if systems is not None and name not in systems:
             continue
         try:
             results[name] = check(cfg)

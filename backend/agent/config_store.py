@@ -74,15 +74,35 @@ FIELD_GROUPS = [
     ("Groq", "The AI model provider", [
         ("GROQ_API_KEY", "API key", True, ""),
     ]),
+    # Read by auth_store at every sign-in, so a save takes effect at the next one.
+    ("LDAP", "Sign in with company directory accounts", [
+        ("LDAP_ENABLED", "Directory sign-in on (true/false)", False, "true"),
+        ("LDAP_URL", "Server URL", False, "ldap://192.168.1.163:389"),
+        ("LDAP_START_TLS", "StartTLS (true/false)", False, "false"),
+        ("LDAP_CA_FILE", "CA certificate file on this server (TLS only)", False, ""),
+        ("LDAP_BIND_DN", "Bind DN (read-only account)", False,
+         "cn=iqcore-reader,dc=example,dc=local"),
+        ("LDAP_BIND_PASSWORD", "Bind password", True, ""),
+        ("LDAP_USER_BASE", "User base DN", False, "ou=People,dc=example,dc=local"),
+        ("LDAP_USER_ATTR", "Login attribute", False, "uid"),
+        ("LDAP_ADMIN_GROUP", "Admin group DN (members become IQ Core admins)", False,
+         "cn=iqcore-admin,ou=Groups,dc=example,dc=local"),
+        ("LDAP_TEST_USER", "Test sign-in: username (not saved)", False, ""),
+        ("LDAP_TEST_PASSWORD", "Test sign-in: password (not saved)", True, ""),
+    ]),
 ]
 
-ALL_KEYS = [key for _, _, fields in FIELD_GROUPS for key, _, _, _ in fields]
+# Typed only so the Test button can try a sign-in; never saved or applied.
+TEST_ONLY_KEYS = {"LDAP_TEST_USER", "LDAP_TEST_PASSWORD"}
+
+ALL_KEYS = [key for _, _, fields in FIELD_GROUPS for key, _, _, _ in fields
+            if key not in TEST_ONLY_KEYS]
 SECRET_KEYS = {key for _, _, fields in FIELD_GROUPS for key, _, secret, _ in fields if secret}
 
 # Services whose settings belong to the deployment rather than to one account.
-SYSTEM_SERVICES = {"Groq"}
+SYSTEM_SERVICES = {"Groq", "LDAP"}
 SYSTEM_KEYS = {key for service, _, fields in FIELD_GROUPS if service in SYSTEM_SERVICES
-               for key, *_ in fields}
+               for key, *_ in fields} - TEST_ONLY_KEYS
 USER_KEYS = set(ALL_KEYS) - SYSTEM_KEYS
 SERVICE_OF = {key: service for service, _, fields in FIELD_GROUPS for key, *_ in fields}
 

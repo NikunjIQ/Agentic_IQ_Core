@@ -168,8 +168,10 @@ def _public(result: dict) -> dict:
 
 @app.get("/auth/status")
 def auth_status():
-    """Whether any account exists, so a fresh install can offer sign-up first."""
-    return {"accounts": db.count_users()}
+    """Whether any account exists, so a fresh install can offer sign-up first,
+    and whether sign-up is open at all (it closes once the directory is on)."""
+    accounts = db.count_users()
+    return {"accounts": accounts, "signup": not (auth_store.ldap_enabled() and accounts > 0)}
 
 
 @app.post("/auth/login")
@@ -386,6 +388,13 @@ def get_config(user: dict = Depends(current_user)):
     }
 
 
+def _testable(requested: list, user: dict) -> list:
+    """Systems a connection test may run for this user. The LDAP test reports who
+    exists in the directory and in which group, so only an admin may run it."""
+    names = requested or list(config_test.TESTS)
+    return [n for n in names if n != "LDAP" or user["role"] == "admin"]
+
+
 @app.post("/config/test")
 def test_config(request: ConfigRequest, user: dict = Depends(current_user)):
     """Check credentials WITHOUT saving them.
@@ -398,7 +407,7 @@ def test_config(request: ConfigRequest, user: dict = Depends(current_user)):
     field does not mean retyping every masked secret.
     """
     merged = config_store.user_merged(user["id"], request.values)
-    return {"results": config_test.test_all(merged, request.systems or None)}
+    return {"results": config_test.test_all(merged, _testable(request.systems, user))}
 
 
 @app.post("/config")
@@ -410,7 +419,7 @@ def save_config(request: ConfigRequest, user: dict = Depends(current_user)):
     result = config_store.user_save(user["id"], request.values,
                                     allow_system=user["role"] == "admin")
     result["results"] = config_test.test_all(config_store.user_merged(user["id"]),
-                                             request.systems or None)
+                                             _testable(request.systems, user))
     return result
 
 

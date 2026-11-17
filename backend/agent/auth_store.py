@@ -27,7 +27,7 @@ import sqlite3
 import ssl
 
 import ldap3
-from ldap3.core.exceptions import LDAPException
+from ldap3.core.exceptions import LDAPBindError, LDAPException
 from ldap3.utils.conv import escape_filter_chars
 
 from agent import db
@@ -64,6 +64,12 @@ def signup(username: str, password: str, email: str) -> dict:
         return {"ok": False, "error": "Password must be at least 6 characters."}
     if not _EMAIL.match(email):
         return {"ok": False, "error": "That email address doesn't look right."}
+    # With the directory on, accounts come from it. Open sign-up would let anyone
+    # claim a directory user's name locally and lock that person out. A fresh
+    # install still gets its first (admin) account, the break-glass login.
+    if ldap_enabled() and db.count_users() > 0:
+        return {"ok": False, "error": "Sign in with your company directory username and "
+                                      "password; new accounts are not created here."}
     if db.find_user(username):
         return {"ok": False, "error": "That username is already taken."}
     if db.email_taken(email):
@@ -91,7 +97,7 @@ def login(username: str, password: str) -> dict:
                 "role": user["role"]}
     # A local account with its own password never falls through to LDAP: a
     # directory user of the same name must not be able to take it over.
-    if os.getenv("LDAP_URL", "").strip() and (not user or user["password_hash"] == DIRECTORY_ACCOUNT):
+    if ldap_enabled() and (not user or user["password_hash"] == DIRECTORY_ACCOUNT):
         return _directory_login((username or "").strip(), password or "")
     # One message for both cases: saying which half was wrong tells an attacker
     # which usernames exist.
@@ -105,7 +111,7 @@ def _directory_login(username: str, password: str) -> dict:
         log.warning("LDAP sign-in for %r failed: %s", username, exc)
         return {"ok": False, "error": "The company directory could not be reached. "
                                       "Try again shortly, or use a local account."}
-    if not found:
+    if not found.get("accepted"):
         return {"ok": False, "error": "Username or password is incorrect."}
 
     user = db.find_user(username)
@@ -124,48 +130,73 @@ def _directory_login(username: str, password: str) -> dict:
     return {"ok": True, "user_id": user["id"], "username": user["username"], "role": role}
 
 
-def ldap_check(username: str, password: str):
-    """{"email", "admin"} when the directory accepts username/password, else None.
+def _on(value) -> bool:
+    return str(value or "").strip().lower() in ("1", "true", "yes", "on")
 
-    Raises LDAPException when the directory itself is unreachable or the service
-    account is refused, so that is not mistaken for a wrong password.
+
+def ldap_enabled(cfg=os.environ) -> bool:
+    """A server URL is set and the switch is not off. Unset switch means on, so
+    a .env with only LDAP_URL keeps working."""
+    return bool(str(cfg.get("LDAP_URL") or "").strip()) and _on(cfg.get("LDAP_ENABLED") or "true")
+
+
+def _bind(server, dn, password, start_tls):
+    """A bound connection, or None when the directory refuses the credentials.
+
+    bind()'s own answer, not auto_bind: ldap3's mock reports a refused auto_bind
+    as a success, and the password check must not depend on such details."""
+    conn = ldap3.Connection(server, dn, password, receive_timeout=10)
+    if start_tls:
+        conn.open()
+        if not conn.start_tls():
+            conn.unbind()
+            raise LDAPException("StartTLS was refused")
+    if conn.bind():
+        return conn
+    conn.unbind()
+    return None
+
+
+def ldap_check(username: str, password: str, cfg=os.environ) -> dict:
+    """Ask the directory about username/password, with the settings in cfg.
+
+    {"dn": None}                   no single entry has that username
+    {"dn": ..., "accepted": False} found, password wrong or not given
+    {"dn": ..., "accepted": True, "email": ..., "admin": bool}
+
+    Raises LDAPException when the directory is unreachable or refuses the
+    service account, so that is never mistaken for a wrong password.
     """
-    # An empty password is an LDAP "unauthenticated bind", which servers accept
-    # for any DN: it must never count as a correct password.
-    if not username or not password:
-        return None
-    start_tls = os.getenv("LDAP_START_TLS", "false").lower() in ("1", "true", "yes")
+    start_tls = _on(cfg.get("LDAP_START_TLS"))
     # Certificates are verified: ldap3's own default is to accept any.
-    tls = ldap3.Tls(validate=ssl.CERT_REQUIRED, ca_certs_file=os.getenv("LDAP_CA_FILE") or None)
-    server = ldap3.Server(os.environ["LDAP_URL"].strip(), tls=tls, connect_timeout=5)
-    bind = ldap3.AUTO_BIND_TLS_BEFORE_BIND if start_tls else ldap3.AUTO_BIND_NO_TLS
+    tls = ldap3.Tls(validate=ssl.CERT_REQUIRED, ca_certs_file=cfg.get("LDAP_CA_FILE") or None)
+    server = ldap3.Server(str(cfg.get("LDAP_URL") or "").strip(), tls=tls, connect_timeout=5)
 
-    with ldap3.Connection(server, os.getenv("LDAP_BIND_DN"), os.getenv("LDAP_BIND_PASSWORD"),
-                          auto_bind=bind, receive_timeout=10) as svc:
-        attr = os.getenv("LDAP_USER_ATTR", "uid")
-        svc.search(os.getenv("LDAP_USER_BASE", "ou=People,dc=example,dc=local"),
+    svc = _bind(server, cfg.get("LDAP_BIND_DN") or None, cfg.get("LDAP_BIND_PASSWORD") or None,
+                start_tls)
+    if not svc:
+        raise LDAPBindError("the directory refused the bind DN or bind password")
+    try:
+        if not username:
+            return {"dn": None}
+        attr = cfg.get("LDAP_USER_ATTR") or "uid"
+        svc.search(cfg.get("LDAP_USER_BASE") or "ou=People,dc=example,dc=local",
                    f"({attr}={escape_filter_chars(username)})", attributes=["mail"])
         hits = [r for r in svc.response if r["type"] == "searchResEntry"]
         if len(hits) != 1:  # none, or ambiguous: refuse rather than guess who it is
-            return None
+            return {"dn": None}
         dn = hits[0]["dn"]
-        # bind()'s own answer, not auto_bind: the password check is the one
-        # thing here that must not depend on how a library reports failure.
-        user = ldap3.Connection(server, dn, password, receive_timeout=10)
-        try:
-            if start_tls:
-                user.open()
-                if not user.start_tls():
-                    raise LDAPException("StartTLS was refused")
-            accepted = user.bind()
-        finally:
-            user.unbind()
-        if not accepted:
-            return None
+
+        # An empty password is an LDAP "unauthenticated bind", which servers
+        # accept for any DN: it must never count as a correct password.
+        user = _bind(server, dn, password, start_tls) if password else None
+        if not user:
+            return {"dn": dn, "accepted": False}
+        user.unbind()
 
         # Covers groupOfNames, groupOfUniqueNames and posixGroup without having
         # to know which one the directory uses.
-        group = os.getenv("LDAP_ADMIN_GROUP", "").strip()
+        group = str(cfg.get("LDAP_ADMIN_GROUP") or "").strip()
         admin = bool(group) and svc.search(
             group, f"(|(member={escape_filter_chars(dn)})(uniqueMember={escape_filter_chars(dn)})"
                    f"(memberUid={escape_filter_chars(username)}))",
@@ -173,4 +204,6 @@ def ldap_check(username: str, password: str):
         mail = hits[0]["attributes"].get("mail") or None
         if isinstance(mail, list):
             mail = mail[0] if mail else None
-        return {"email": mail, "admin": bool(admin)}
+        return {"dn": dn, "accepted": True, "email": mail, "admin": bool(admin)}
+    finally:
+        svc.unbind()

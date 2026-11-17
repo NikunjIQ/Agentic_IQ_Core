@@ -693,9 +693,10 @@ def test_config_field_groups_cover_every_system():
     from agent import config_store
     systems = {group[0] for group in config_store.FIELD_GROUPS}
     assert systems == {"Zabbix", "Zammad", "Prometheus", "OpenSearch", "Ceph",
-                       "Ceph container logs", "Groq"}
+                       "Ceph container logs", "Groq", "LDAP"}
     for key in ("ZABBIX_PASS", "ZAMMAD_PASS", "PROMETHEUS_PASS", "PROMETHEUS_TOKEN",
-                "OPENSEARCH_PASS", "CEPH_PASS", "OPENSEARCH2_PASS", "GROQ_API_KEY"):
+                "OPENSEARCH_PASS", "CEPH_PASS", "OPENSEARCH2_PASS", "GROQ_API_KEY",
+                "LDAP_BIND_PASSWORD", "LDAP_TEST_PASSWORD"):
         assert key in config_store.SECRET_KEYS, f"{key} must be treated as a secret"
 
     # A system reachable by a tool but absent from the form can only be

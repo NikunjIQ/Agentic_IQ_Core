@@ -1494,8 +1494,10 @@ async function showGate() {
   // A fresh install has no accounts, so open on sign-up rather than a login
   // nobody can pass.
   try {
-    const { accounts } = await (await fetch("/auth/status")).json();
+    const { accounts, signup } = await (await fetch("/auth/status")).json();
     gateMode(accounts === 0);
+    // Company directory on: accounts come from it, so no "Create one" link.
+    $("gate-switch").parentElement.hidden = signup === false;
     $("gate-lede").textContent = accounts === 0
       ? "No accounts exist yet. The first one you create is the admin."
       : "Ask across Zabbix, Zammad, Prometheus, Ceph and OpenSearch.";
